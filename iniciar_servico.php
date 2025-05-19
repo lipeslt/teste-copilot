@@ -4,60 +4,59 @@ require 'db_connection.php';
 header('Content-Type: application/json');
 session_start();
 
-// Verificação de autenticação
-if (empty($_SESSION['user_id'])) {
-    http_response_code(401);
-    die(json_encode(['success' => false, 'message' => 'Não autenticado']));
-}
-
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    http_response_code(405);
-    die(json_encode(['success' => false, 'message' => 'Método não permitido']));
-}
-
-$input = json_decode(file_get_contents('php://input'), true);
-if (json_last_error() !== JSON_ERROR_NONE) {
-    http_response_code(400);
-    die(json_encode(['success' => false, 'message' => 'JSON inválido']));
-}
-
-if (empty($input['tipo']) || empty($input['id'])) {
-    http_response_code(400);
-    die(json_encode(['success' => false, 'message' => 'Dados incompletos']));
-}
-
 try {
+    // Verificação de autenticação
+    if (empty($_SESSION['user_id'])) {
+        throw new Exception('Usuário não autenticado', 401);
+    }
+
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        throw new Exception('Método não permitido', 405);
+    }
+
+    $input = json_decode(file_get_contents('php://input'), true);
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        throw new Exception('JSON inválido', 400);
+    }
+
+    if (empty($input['tipo']) || empty($input['id'])) {
+        throw new Exception('Dados incompletos: tipo e id são obrigatórios', 400);
+    }
+
     $conn->beginTransaction();
     $mecanico_id = $_SESSION['user_id'];
     $tipo = $input['tipo'];
-    $id = $input['id'];
+    $id = (int)$input['id'];
 
     // Verificar se o serviço existe e está como 'aceito'
-    $sql = "SELECT id FROM servicos_mecanica 
-            WHERE mecanico_id = ? AND status = 'aceito' AND ";
+    $sql = "SELECT id, notificacao_id, ficha_id FROM servicos_mecanica 
+            WHERE mecanico_id = ? AND status = 'aceito' AND (";
     
     if ($tipo === 'notificacao') {
-        $sql .= "notificacao_id = ?";
+        $sql .= "notificacao_id = ?)";
     } elseif ($tipo === 'ficha') {
-        $sql .= "ficha_id = ?";
+        $sql .= "ficha_id = ?)";
     } else {
-        throw new Exception('Tipo de serviço inválido');
+        throw new Exception('Tipo de serviço inválido. Use "notificacao" ou "ficha"', 400);
     }
 
     $stmt = $conn->prepare($sql);
     $stmt->execute([$mecanico_id, $id]);
+    $servico = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    if ($stmt->rowCount() === 0) {
-        throw new Exception('Serviço não encontrado ou não está no estado correto');
+    if (!$servico) {
+        throw new Exception('Serviço não encontrado ou não está no estado "aceito"', 404);
     }
 
     // Atualizar o serviço para 'em_andamento'
     $stmt = $conn->prepare("
         UPDATE servicos_mecanica 
-        SET status = 'em_andamento', inicio_servico = NOW() 
-        WHERE mecanico_id = ? AND " . ($tipo === 'notificacao' ? "notificacao_id" : "ficha_id") . " = ?
+        SET status = 'em_andamento', 
+            inicio_servico = NOW(),
+            updated_at = NOW()
+        WHERE id = ?
     ");
-    $stmt->execute([$mecanico_id, $id]);
+    $stmt->execute([$servico['id']]);
 
     // Atualizar a origem (notificação ou ficha)
     if ($tipo === 'notificacao') {
@@ -71,15 +70,18 @@ try {
 
     echo json_encode([
         'success' => true,
-        'message' => 'Serviço iniciado com sucesso'
+        'message' => 'Serviço iniciado com sucesso',
+        'service_id' => $servico['id']
     ]);
 
 } catch (Exception $e) {
     $conn->rollBack();
-    http_response_code(400);
+    http_response_code($e->getCode() ?: 400);
     echo json_encode([
         'success' => false,
-        'message' => $e->getMessage()
+        'message' => $e->getMessage(),
+        'error_code' => $e->getCode()
     ]);
+    exit();
 }
 ?>

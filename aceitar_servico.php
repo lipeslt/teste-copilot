@@ -9,18 +9,20 @@ try {
         throw new Exception('Usuário não autenticado');
     }
 
-    $input = file_get_contents('php://input');
-    $data = json_decode($input, true);
+    $input = json_decode(file_get_contents('php://input'), true);
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        throw new Exception('JSON inválido');
+    }
 
-    if (!isset($data['tipo']) || !isset($data['id'])) {
+    if (!isset($input['tipo']) || !isset($input['id'])) {
         throw new Exception('Parâmetros inválidos');
     }
 
     $conn->beginTransaction();
 
     $mecanico_id = $_SESSION['user_id'];
-    $tipo = $data['tipo'];
-    $id = intval($data['id']);
+    $tipo = $input['tipo'];
+    $id = (int)$input['id'];
 
     if ($tipo === 'notificacao') {
         // Verificar se a notificação existe e está disponível
@@ -32,7 +34,7 @@ try {
             throw new Exception('Notificação não encontrada ou já em serviço');
         }
 
-        // Inserir o serviço como ACEITO (não iniciado ainda)
+        // Inserir o serviço como ACEITO
         $sql = "INSERT INTO servicos_mecanica (
             notificacao_id,
             mecanico_id,
@@ -69,7 +71,7 @@ try {
             throw new Exception('Ficha não encontrada ou já em serviço');
         }
 
-        // Inserir o serviço como ACEITO (não iniciado ainda)
+        // Inserir o serviço como ACEITO
         $sql = "INSERT INTO servicos_mecanica (
             ficha_id,
             mecanico_id,
@@ -106,10 +108,10 @@ try {
 
 } catch (Exception $e) {
     $conn->rollBack();
-    error_log("Erro ao aceitar serviço: " . $e->getMessage());
+    http_response_code(400);
     echo json_encode([
         'success' => false,
-        'message' => 'Erro ao aceitar serviço: ' . $e->getMessage()
+        'message' => $e->getMessage()
     ]);
     exit();
 }

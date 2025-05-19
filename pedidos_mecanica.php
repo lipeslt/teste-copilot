@@ -15,7 +15,7 @@ try {
     // Query para mostrar apenas as fichas que ainda não foram acopladas a um serviço
     $queryFichas = "SELECT f.*, 'ficha' AS tipo_origem 
                     FROM ficha_defeito f 
-                    WHERE f.status = 'aceito' 
+                    WHERE f.status = 'pendente' 
                     AND NOT EXISTS (
                         SELECT 1 
                         FROM servicos_mecanica sm 
@@ -26,7 +26,6 @@ try {
     $fichas_aceitas = $stmtFichas->fetchAll(PDO::FETCH_ASSOC);
 
     // Pedidos Aceitos dos serviços (servicos_mecanica)
-    // Check for ficha_id first so that records from a ficha are marked as 'ficha'
     $queryPedidos = "
         SELECT 
             sm.*,
@@ -73,7 +72,7 @@ try {
     // Notificações com status aceito
     $queryNotificacoes = "SELECT n.*, 'notificacao' AS tipo_origem
                           FROM notificacoes n
-                          WHERE status = 'aceito'";
+                          WHERE status = 'pendente'";
     $stmtNotificacoes = $conn->query($queryNotificacoes);
     $notificacoes_aceitas = $stmtNotificacoes->fetchAll(PDO::FETCH_ASSOC);
 
@@ -265,22 +264,114 @@ try {
         return new Date(dateString).toLocaleDateString('pt-BR', options);
       };
 
-      const handlePrioridade = (pedidoId, prioridade) => {
-        fetch('atualizar_prioridade.php', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ pedido_id: pedidoId, prioridade: prioridade }),
-        })
-        .then(response => response.json())
-        .then(data => {
-          console.log('Prioridade atualizada:', data);
-        })
-        .catch((error) => {
-          console.error('Erro:', error);
-        });
-      };
+      // Função para aceitar o serviço (apenas atualiza o status para 'aceito')
+      const handleAceitarServico = async (tipo, id) => {
+  try {
+    const response = await fetch('aceitar_servico.php', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ tipo, id }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || `HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    if (!data.success) {
+      throw new Error(data.message || 'Falha ao aceitar o serviço');
+    }
+
+    // Atualiza o estado local
+    if (tipo === 'ficha') {
+      setFichasDisponiveis(prev => prev.filter(f => f.id !== id));
+    } else if (tipo === 'notificacao') {
+      setNotificacoesDisponiveis(prev => prev.filter(n => n.id !== id));
+    }
+
+    // Recarrega os pedidos ativos
+    await fetchPedidosAtivos();
+    
+    Swal.fire({
+      title: 'Sucesso!',
+      text: 'Serviço aceito com sucesso! Agora você pode iniciá-lo quando quiser.',
+      icon: 'success',
+      confirmButtonText: 'OK'
+    });
+    
+  } catch (error) {
+    console.error('Erro:', error);
+    Swal.fire({
+      title: 'Erro!',
+      text: error.message || 'Erro ao aceitar serviço',
+      icon: 'error',
+      confirmButtonText: 'OK'
+    });
+  }
+};
+
+      // Função para iniciar um serviço já aceito
+      const handleIniciarServico = async (tipo, id) => {
+  try {
+    const response = await fetch('iniciar_servico.php', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        tipo: tipo,
+        id: id
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || `Erro HTTP! Status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    if (!data.success) {
+      throw new Error(data.message || 'Erro ao iniciar serviço');
+    }
+
+    // Atualiza estado removendo o item das listas
+    if (tipo === 'ficha') {
+      setFichasDisponiveis(prev => prev.filter(f => f.id !== id));
+    } else if (tipo === 'notificacao') {
+      setNotificacoesDisponiveis(prev => prev.filter(n => n.id !== id));
+    }
+
+    // Recarrega pedidos ativos
+    const pedidosResponse = await fetch('get_pedidos_ativos.php');
+    const pedidosData = await pedidosResponse.json();
+    
+    if (pedidosData.success) {
+      setPedidosAtivos(pedidosData.pedidos);
+    }
+
+    setActiveTab('pedidos');
+    Swal.fire({
+      title: 'Sucesso!',
+      text: 'Serviço iniciado com sucesso',
+      icon: 'success',
+      confirmButtonText: 'OK'
+    });
+
+  } catch (error) {
+    console.error('Erro ao iniciar serviço:', error);
+    Swal.fire({
+      title: 'Erro!',
+      text: error.message || 'Erro ao iniciar serviço',
+      icon: 'error',
+      confirmButtonText: 'OK'
+    });
+  }
+};
 
       const handleTempoTarefa = (pedidoId, tempo) => {
         fetch('atualizar_tempo.php', {
@@ -297,97 +388,6 @@ try {
         .catch((error) => {
           console.error('Erro:', error);
         });
-      };
-
-      // Função para aceitar o serviço (não inicia ainda)
-      const handleAceitarServico = async (tipo, id) => {
-        try {
-          const response = await fetch('aceitar_servico.php', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ tipo, id }),
-          });
-          const data = await response.json();
-          
-          if (!data.success) {
-            throw new Error(data.message || 'Falha ao aceitar o serviço');
-          }
-      
-          // Atualiza o estado local
-          if (tipo === 'ficha') {
-            setFichasDisponiveis(prev => prev.filter(f => f.id !== id));
-          } else if (tipo === 'notificacao') {
-            setNotificacoesDisponiveis(prev => prev.filter(n => n.id !== id));
-          }
-      
-          // Recarrega os pedidos ativos (que agora incluem o serviço aceito)
-          await fetchPedidosAtivos();
-          
-          Swal.fire({
-            title: 'Sucesso!',
-            text: 'Serviço aceito com sucesso! Agora você pode iniciá-lo quando quiser.',
-            icon: 'success',
-            confirmButtonText: 'OK'
-          });
-      
-        } catch (error) {
-          console.error('Erro:', error);
-          Swal.fire({
-            title: 'Erro!',
-            text: error.message || 'Erro ao aceitar serviço',
-            icon: 'error',
-            confirmButtonText: 'OK'
-          });
-        }
-      };
-
-      // Função para iniciar um serviço já aceito
-      const handleIniciarServico = async (tipo, id) => {
-        try {
-          const response = await fetch('iniciar_servico.php', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              tipo: tipo,
-              id: id
-            }),
-          });
-
-          if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-          }
-
-          const data = await response.json();
-          
-          if (!data.success) {
-            throw new Error(data.message || 'Erro ao iniciar serviço');
-          }
-
-          // Atualiza estado
-          if (tipo === 'ficha') {
-            setFichasDisponiveis(prev => prev.filter(f => f.id !== id));
-          } else if (tipo === 'notificacao') {
-            setNotificacoesDisponiveis(prev => prev.filter(n => n.id !== id));
-          }
-
-          // Recarrega pedidos ativos
-          const pedidosResponse = await fetch('get_pedidos_ativos.php');
-          const pedidosData = await pedidosResponse.json();
-          if (pedidosData.success) {
-            setPedidosAtivos(pedidosData.pedidos);
-          }
-
-          setActiveTab('pedidos');
-          Swal.fire('Sucesso!', 'Serviço iniciado com sucesso', 'success');
-
-        } catch (error) {
-          console.error('Erro:', error);
-          Swal.fire('Erro!', error.message, 'error');
-        }
       };
 
       const fetchPedidosAtivos = async () => {
@@ -451,7 +451,7 @@ try {
         return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
       };
 
-      // Substitua a função handleVerDetalhes por esta versão corrigida:
+      // Função para ver os detalhes do pedido/serviço
       const handleVerDetalhes = (item) => {
         setSelectedPedido(item);
         let conteudoPrincipal = [];
@@ -891,7 +891,7 @@ try {
             ].map((item) => (
               <button
                 key={item.tab}
-                className={`flex flex-col items-center p-2 transition-all ${item.tab === 'logout' ? 'text-red-500 hover:text-red-600' : (activeTab === item.tab ? 'text-primary' : 'text-gray-400 hover:text-primary/80')}`}
+                className={`flex flex-col items-center p-2 transition-all ${item.tab === 'logout' ? 'text-red-500 hover:text-red-600' : (activeTab === item.tab ? 'text-primary' : 'text-gray-400 hover:text-primary')}`}
                 onClick={() => {
                   if (item.tab === 'profile') {
                     window.location.href = 'perfil.php';
