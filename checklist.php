@@ -27,8 +27,290 @@ if ($codigo_veiculo) {
         $placa_veiculo = htmlspecialchars($resultado['placa']);
         $status_veiculo = $resultado['status'];
 
-        // Verifica se o veículo está em uso
-        if ($status_veiculo != 'ativo') {
+        // Verifica se o veículo está bloqueado
+        if ($status_veiculo == 'bloqueado') {
+            // Exibe a tela de veículo bloqueado
+            ?>
+            <!DOCTYPE html>
+            <html lang="pt">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                <title>Veículo Bloqueado</title>
+                <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+                <script src="https://cdn.tailwindcss.com"></script>
+                <script>
+                    tailwind.config = {
+                        theme: {
+                            extend: {
+                                colors: {
+                                    'primary': '#4F46E5',
+                                    'primary-dark': '#4338CA',
+                                    'secondary': '#F59E0B',
+                                    'accent': '#10B981',
+                                    'success': '#10B981',
+                                    'warning': '#F59E0B',
+                                    'danger': '#EF4444',
+                                },
+                                boxShadow: {
+                                    'soft': '0 4px 24px -6px rgba(0, 0, 0, 0.1)',
+                                    'hard': '0 8px 24px -6px rgba(79, 70, 229, 0.3)'
+                                }
+                            }
+                        }
+                    }
+                </script>
+                <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+                <style>
+                    * {
+                        -webkit-tap-highlight-color: transparent;
+                    }
+                    body {
+                        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+                        background-color: #f8fafc;
+                    }
+                    .app-container {
+                        max-width: 480px;
+                        height: 100dvh;
+                        margin: 0 auto;
+                        background: white;
+                        position: relative;
+                        overflow: hidden;
+
+                    }
+                    .input-field {
+                        transition: all 0.2s ease;
+                        position: relative;
+                    }
+                    .input-field:focus-within {
+                        border-color: #4F46E5;
+                        box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+                    }
+                    .btn-primary {
+                        background-color: #4F46E5;
+                        transition: all 0.2s ease;
+                    }
+                    .btn-primary:hover {
+                        background-color: #4338CA;
+                        transform: translateY(-1px);
+                        box-shadow: 0 6px 12px rgba(79, 70, 229, 0.25);
+                    }
+                    .logo-container {
+                        background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%);
+                    }
+                    .forms-container {
+                        height: calc(100dvh - 12rem);
+                        overflow-y: auto;
+                        -webkit-overflow-scrolling: touch;
+                    }
+                    .forms-container::-webkit-scrollbar {
+                        display: none;
+                    }
+                    .nav-button {
+                        width: 2.5rem;
+                        height: 2.5rem;
+                        border-radius: 50%;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+                        transition: all 0.2s ease;
+                    }
+                    .nav-button:hover {
+                        transform: scale(1.05);
+                    }
+                    .hidden {
+                        display: none;
+                    }
+                    .input-icon {
+                        position: absolute;
+                        left: 0.75rem;
+                        top: 50%;
+                        transform: translateY(-50%);
+                        font-size: 1rem;
+                        width: 1.25rem;
+                        text-align: center;
+                    }
+                    .message-container {
+                        position: fixed;
+                        top: 20px;
+                        left: 50%;
+                        transform: translateX(-50%);
+                        width: 90%;
+                        max-width: 600px;
+                        text-align: center;
+                        background: #fff;
+                        padding: 12px 20px;
+                        border-radius: 8px;
+                        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+                        font-size: 16px;
+                        font-weight: 500;
+                        opacity: 1;
+                        transition: opacity 0.5s ease-in-out;
+                        z-index: 9999;
+                    }
+                    .success {
+                        border-left: 5px solid #10B981;
+                        color: #10B981;
+                    }
+                    .error {
+                        border-left: 5px solid #EF4444;
+                        color: #EF4444;
+                    }
+                    .vehicle-card {
+                        background: white;
+                        border-radius: 0.75rem;
+                        padding: 1rem;
+                        margin: 1rem 0;
+                        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+                        border-left: 4px solid #EF4444;
+                    }
+
+                    .vehicle-card p {
+                        display: flex;
+                        align-items: center;
+                        font-size: 0.875rem;
+                        margin: 0.4rem 0;
+                        gap: 0.5rem; /* controla o espaço entre ícone, label e valor */
+                    }
+
+                    .vehicle-card i {
+                        color: #4F46E5;
+                        width: 1.2rem;
+                        text-align: center;
+                        flex-shrink: 0;
+                    }
+
+                    .vehicle-card strong {
+                        font-weight: 600;
+                        white-space: nowrap;
+                        flex-shrink: 0;
+                    }
+
+                    .usuario-atual {
+                        transition: all 0.3s ease;
+                        font-weight: 500;
+                    }
+                    .error-message {
+                        color: #6B7280;
+                        margin: 1rem 0;
+                        line-height: 1.5;
+                    }
+                    .button-container {
+                        display: flex;
+                        flex-direction: column;
+                        gap: 0.75rem;
+                        margin-top: 1.5rem;
+                    }
+                    .btn {
+                        display: inline-flex;
+                        align-items: center;
+                        justify-content: center;
+                        padding: 0.75rem 1.5rem;
+                        border-radius: 0.75rem;
+                        font-weight: 600;
+                        transition: all 0.2s ease;
+                        text-decoration: none;
+                    }
+                    .btn i {
+                        margin-right: 0.5rem;
+                    }
+                    .btn-back {
+                        background: linear-gradient(135deg, #10B981, #059669);
+                        color: white;
+                    }
+                    .btn-checklist {
+                        background: linear-gradient(135deg, #4F46E5, #4338CA);
+                        color: white;
+                    }
+                    .btn:hover {
+                        transform: translateY(-2px);
+                        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                    }
+                    @keyframes pulse {
+                        0% { transform: scale(1); }
+                        50% { transform: scale(1.05); }
+                        100% { transform: scale(1); }
+                    }
+                    .pulse {
+                        animation: pulse 1.5s infinite;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="app-container relative">
+                    <!-- Logo Header -->
+                    <div class="logo-container h-48 rounded-b-3xl flex flex-col items-center justify-center shadow-hard relative">
+                        <div class="nav-button bg-white absolute top-6 left-6" onclick="window.location.href = 'carros.php'">
+                            <i class="fas fa-chevron-left text-primary"></i>
+                        </div>
+                        <div class="nav-button bg-white absolute top-6 right-6" onclick="redirectHome()">
+                            <i class="fas fa-home text-primary"></i>
+                        </div>
+                        <div class="bg-white/20 p-4 rounded-full mb-4">
+                            <i class="fas fa-ban text-white text-4xl pulse"></i>
+                        </div>
+                        <h1 class="text-white text-2xl font-bold">Veículo Bloqueado</h1>
+                    </div>
+
+                    <!-- Forms Container -->
+                    <div class="forms-container px-5 pb-6 -mt-8 relative">
+                        <div class="bg-white rounded-2xl p-6 shadow-hard">
+                            <div class="vehicle-card">
+                                <p><i class="fas fa-car text-primary"></i><strong>Veículo:</strong> <?php echo htmlspecialchars($veiculo); ?></p>
+                                <p><i class="fas fa-id-card text-primary"></i><strong>Placa:</strong> <?php echo htmlspecialchars($placa_veiculo); ?></p>
+                                <p><i class="fas fa-tag text-primary"></i><strong>Tipo:</strong> <?php echo htmlspecialchars($tipo_veiculo); ?></p>
+                                <p><i class="fas fa-info-circle text-primary"></i><strong>Status:</strong> <span class="font-bold text-danger">Bloqueado</span></p>
+                            </div>
+
+                            <p class="error-message text-center">
+                                Este veículo está temporariamente bloqueado e não pode ser utilizado.
+                                Por favor, entre em contato com o administrador para mais informações.
+                            </p>
+
+                            <div class="button-container">
+                                <a href="<?php
+                                    if (!isset($_SESSION['role'])) {
+                                        echo 'login.php';
+                                    } elseif ($_SESSION['role'] === 'user') {
+                                        echo 'menu.php';
+                                    } elseif ($_SESSION['role'] === 'admin') {
+                                        echo 'menuadm.php';
+                                    } elseif ($_SESSION['role'] === 'geraladm') {
+                                        echo 'menugeraladm.php';
+                                    } else {
+                                        echo 'login.php';
+                                    }
+                                ?>" class="btn btn-back">
+                                    <i class="fas fa-arrow-left"></i> Voltar ao Menu
+                                </a>
+                                <a href="carros.php" class="btn btn-checklist">
+                                    <i class="fas fa-clipboard-check"></i> Selecionar outro veículo
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <script>
+                    function redirectHome() {
+                        let role = '<?php echo $_SESSION['role']; ?>';
+                        if (role === 'user') {
+                            window.location.href = 'menu.php';
+                        } else if (role === 'admin') {
+                            window.location.href = 'menuadm.php';
+                        } else if (role === 'geraladm') {
+                            window.location.href = 'menugeraladm.php';
+                        }
+                    }
+                </script>
+            </body>
+            </html>
+            <?php
+            exit();
+        }
+        // Verifica se o veículo está em uso (já existente)
+        else if ($status_veiculo != 'ativo') {
             // Busca o último usuário do veículo e seu número de telefone
             $query_usuario = "SELECT r.nome, u.number
                               FROM registros r
@@ -606,7 +888,7 @@ if ($codigo_veiculo) {
                                         <i class="fas fa-chevron-down text-xs"></i>
                                     </div>
                                 </div>
-                                <textarea name="obs_combustivel" class="observation-field <?php if (!isset($ultimo_checklist['obs_combustivel']) || empty($ultimo_checklist['obs_combustivel'])) echo 'hidden'; ?>" placeholder="Descreva o problema"><?php echo isset($ultimo_checklist['obs_combustivel']) ? htmlspecialchars($ultimo_checklist['obs_combustivel']) : ''; ?></textarea>
+                                <textarea name="obs_combustivel" class="observation-field <?php if (!isset($ultimo_checklist['obs_combustivel']) || empty($ultimo_checklist['obs_combustivel'])) echo 'hidden'; ?>" placeholder="Observações adicionais..."><?php echo isset($ultimo_checklist['obs_combustivel']) ? $ultimo_checklist['obs_combustivel'] : ''; ?></textarea>
                             </div>
 
                             <!-- Água -->
@@ -625,7 +907,7 @@ if ($codigo_veiculo) {
                                         <i class="fas fa-chevron-down text-xs"></i>
                                     </div>
                                 </div>
-                                <textarea name="obs_agua" class="observation-field <?php if (!isset($ultimo_checklist['obs_agua']) || empty($ultimo_checklist['obs_agua'])) echo 'hidden'; ?>" placeholder="Descreva o problema"><?php echo isset($ultimo_checklist['obs_agua']) ? htmlspecialchars($ultimo_checklist['obs_agua']) : ''; ?></textarea>
+                                <textarea name="obs_agua" class="observation-field <?php if (!isset($ultimo_checklist['obs_agua']) || empty($ultimo_checklist['obs_agua'])) echo 'hidden'; ?>" placeholder="Observações adicionais..."><?php echo isset($ultimo_checklist['obs_agua']) ? $ultimo_checklist['obs_agua'] : ''; ?></textarea>
                             </div>
 
                             <!-- Óleo -->
@@ -644,7 +926,7 @@ if ($codigo_veiculo) {
                                         <i class="fas fa-chevron-down text-xs"></i>
                                     </div>
                                 </div>
-                                <textarea name="obs_oleo" class="observation-field <?php if (!isset($ultimo_checklist['obs_oleo']) || empty($ultimo_checklist['obs_oleo'])) echo 'hidden'; ?>" placeholder="Descreva o problema"><?php echo isset($ultimo_checklist['obs_oleo']) ? htmlspecialchars($ultimo_checklist['obs_oleo']) : ''; ?></textarea>
+                                <textarea name="obs_oleo" class="observation-field <?php if (!isset($ultimo_checklist['obs_oleo']) || empty($ultimo_checklist['obs_oleo'])) echo 'hidden'; ?>" placeholder="Observações adicionais..."><?php echo isset($ultimo_checklist['obs_oleo']) ? $ultimo_checklist['obs_oleo'] : ''; ?></textarea>
                             </div>
 
                             <!-- Bateria -->
@@ -657,13 +939,13 @@ if ($codigo_veiculo) {
                                     <select name="bateria" class="w-full bg-transparent focus:outline-none" onchange="updateSelectStyle(this); showObservation(this);">
                                         <option value="Ok" <?php if (isset($ultimo_checklist['bateria']) && $ultimo_checklist['bateria'] == 'Ok') echo 'selected'; ?>>OK</option>
                                         <option value="Trocar" <?php if (isset($ultimo_checklist['bateria']) && $ultimo_checklist['bateria'] == 'Trocar') echo 'selected'; ?>>Trocar</option>
-                                        <option value="Necessita de Carga" <?php if (isset($ultimo_checklist['bateria']) && $ultimo_checklist['bateria'] == 'Necessita de Carga') echo 'selected'; ?>>Carga</option>
+                                        <option value="Necessita de Carga" <?php if (isset($ultimo_checklist['bateria']) && $ultimo_checklist['bateria'] == 'Necessita de Carga') echo 'selected'; ?>>Carregar</option>
                                     </select>
                                     <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400">
                                         <i class="fas fa-chevron-down text-xs"></i>
                                     </div>
                                 </div>
-                                <textarea name="obs_bateria" class="observation-field <?php if (!isset($ultimo_checklist['obs_bateria']) || empty($ultimo_checklist['obs_bateria'])) echo 'hidden'; ?>" placeholder="Descreva o problema"><?php echo isset($ultimo_checklist['obs_bateria']) ? htmlspecialchars($ultimo_checklist['obs_bateria']) : ''; ?></textarea>
+                                <textarea name="obs_bateria" class="observation-field <?php if (!isset($ultimo_checklist['obs_bateria']) || empty($ultimo_checklist['obs_bateria'])) echo 'hidden'; ?>" placeholder="Observações adicionais..."><?php echo isset($ultimo_checklist['obs_bateria']) ? $ultimo_checklist['obs_bateria'] : ''; ?></textarea>
                             </div>
 
                             <!-- Pneus -->
@@ -682,7 +964,7 @@ if ($codigo_veiculo) {
                                         <i class="fas fa-chevron-down text-xs"></i>
                                     </div>
                                 </div>
-                                <textarea name="obs_pneus" class="observation-field <?php if (!isset($ultimo_checklist['obs_pneus']) || empty($ultimo_checklist['obs_pneus'])) echo 'hidden'; ?>" placeholder="Descreva o problema"><?php echo isset($ultimo_checklist['obs_pneus']) ? htmlspecialchars($ultimo_checklist['obs_pneus']) : ''; ?></textarea>
+                                <textarea name="obs_pneus" class="observation-field <?php if (!isset($ultimo_checklist['obs_pneus']) || empty($ultimo_checklist['obs_pneus'])) echo 'hidden'; ?>" placeholder="Observações adicionais..."><?php echo isset($ultimo_checklist['obs_pneus']) ? $ultimo_checklist['obs_pneus'] : ''; ?></textarea>
                             </div>
 
                             <!-- Filtro de Ar -->
@@ -694,14 +976,14 @@ if ($codigo_veiculo) {
                                     </div>
                                     <select name="filtro_ar" class="w-full bg-transparent focus:outline-none" onchange="updateSelectStyle(this); showObservation(this);">
                                         <option value="Bons" <?php if (isset($ultimo_checklist['filtro_ar']) && $ultimo_checklist['filtro_ar'] == 'Bons') echo 'selected'; ?>>Bons</option>
-                                        <option value="Necessitam de Limpeza" <?php if (isset($ultimo_checklist['filtro_ar']) && $ultimo_checklist['filtro_ar'] == 'Necessitam de Limpeza') echo 'selected'; ?>>Limpeza</option>
-                                        <option value="Necessitam de Troca" <?php if (isset($ultimo_checklist['filtro_ar']) && $ultimo_checklist['filtro_ar'] == 'Necessitam de Troca') echo 'selected'; ?>>Troca</option>
+                                        <option value="Necessitam de Limpeza" <?php if (isset($ultimo_checklist['filtro_ar']) && $ultimo_checklist['filtro_ar'] == 'Necessitam de Limpeza') echo 'selected'; ?>>Limpar</option>
+                                        <option value="Necessitam de Troca" <?php if (isset($ultimo_checklist['filtro_ar']) && $ultimo_checklist['filtro_ar'] == 'Necessitam de Troca') echo 'selected'; ?>>Trocar</option>
                                     </select>
                                     <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400">
                                         <i class="fas fa-chevron-down text-xs"></i>
                                     </div>
                                 </div>
-                                <textarea name="obs_filtro_ar" class="observation-field <?php if (!isset($ultimo_checklist['obs_filtro_ar']) || empty($ultimo_checklist['obs_filtro_ar'])) echo 'hidden'; ?>" placeholder="Descreva o problema"><?php echo isset($ultimo_checklist['obs_filtro_ar']) ? htmlspecialchars($ultimo_checklist['obs_filtro_ar']) : ''; ?></textarea>
+                                <textarea name="obs_filtro_ar" class="observation-field <?php if (!isset($ultimo_checklist['obs_filtro_ar']) || empty($ultimo_checklist['obs_filtro_ar'])) echo 'hidden'; ?>" placeholder="Observações adicionais..."><?php echo isset($ultimo_checklist['obs_filtro_ar']) ? $ultimo_checklist['obs_filtro_ar'] : ''; ?></textarea>
                             </div>
 
                             <!-- Lâmpadas -->
@@ -720,7 +1002,7 @@ if ($codigo_veiculo) {
                                         <i class="fas fa-chevron-down text-xs"></i>
                                     </div>
                                 </div>
-                                <textarea name="obs_lampadas" class="observation-field <?php if (!isset($ultimo_checklist['obs_lampadas']) || empty($ultimo_checklist['obs_lampadas'])) echo 'hidden'; ?>" placeholder="Descreva o problema"><?php echo isset($ultimo_checklist['obs_lampadas']) ? htmlspecialchars($ultimo_checklist['obs_lampadas']) : ''; ?></textarea>
+                                <textarea name="obs_lampadas" class="observation-field <?php if (!isset($ultimo_checklist['obs_lampadas']) || empty($ultimo_checklist['obs_lampadas'])) echo 'hidden'; ?>" placeholder="Observações adicionais..."><?php echo isset($ultimo_checklist['obs_lampadas']) ? $ultimo_checklist['obs_lampadas'] : ''; ?></textarea>
                             </div>
 
                             <!-- Sistema Elétrico -->
@@ -732,14 +1014,14 @@ if ($codigo_veiculo) {
                                     </div>
                                     <select name="sistema_eletrico" class="w-full bg-transparent focus:outline-none" onchange="updateSelectStyle(this); showObservation(this);">
                                         <option value="Bom" <?php if (isset($ultimo_checklist['sistema_eletrico']) && $ultimo_checklist['sistema_eletrico'] == 'Bom') echo 'selected'; ?>>Bom</option>
-                                        <option value="Necessita de Revisão" <?php if (isset($ultimo_checklist['sistema_eletrico']) && $ultimo_checklist['sistema_eletrico'] == 'Necessita de Revisão') echo 'selected'; ?>>Revisão</option>
-                                        <option value="Necessita de Troca" <?php if (isset($ultimo_checklist['sistema_eletrico']) && $ultimo_checklist['sistema_eletrico'] == 'Necessita de Troca') echo 'selected'; ?>>Troca</option>
+                                        <option value="Necessita de Revisão" <?php if (isset($ultimo_checklist['sistema_eletrico']) && $ultimo_checklist['sistema_eletrico'] == 'Necessita de Revisão') echo 'selected'; ?>>Revisar</option>
+                                        <option value="Necessita de Troca" <?php if (isset($ultimo_checklist['sistema_eletrico']) && $ultimo_checklist['sistema_eletrico'] == 'Necessita de Troca') echo 'selected'; ?>>Trocar</option>
                                     </select>
                                     <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400">
                                         <i class="fas fa-chevron-down text-xs"></i>
                                     </div>
                                 </div>
-                                <textarea name="obs_sistema_eletrico" class="observation-field <?php if (!isset($ultimo_checklist['obs_sistema_eletrico']) || empty($ultimo_checklist['obs_sistema_eletrico'])) echo 'hidden'; ?>" placeholder="Descreva o problema"><?php echo isset($ultimo_checklist['obs_sistema_eletrico']) ? htmlspecialchars($ultimo_checklist['obs_sistema_eletrico']) : ''; ?></textarea>
+                                <textarea name="obs_sistema_eletrico" class="observation-field <?php if (!isset($ultimo_checklist['obs_sistema_eletrico']) || empty($ultimo_checklist['obs_sistema_eletrico'])) echo 'hidden'; ?>" placeholder="Observações adicionais..."><?php echo isset($ultimo_checklist['obs_sistema_eletrico']) ? $ultimo_checklist['obs_sistema_eletrico'] : ''; ?></textarea>
                             </div>
                         </div>
                     </div>
