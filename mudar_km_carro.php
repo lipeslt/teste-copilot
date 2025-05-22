@@ -12,7 +12,11 @@ if ($_SESSION['role'] !== 'admin' && $_SESSION['role'] !== 'geraladm') {
 // Configurar conexão para usar UTF-8
 $conn->exec("SET NAMES utf8");
 
-// Função para registrar alterações no histórico
+// Variáveis para registrar o usuário logado e data atual
+$usuario_logado = $_SESSION['username'] ?? 'desconhecido';
+$data_hora_atual = date('Y-m-d H:i:s');
+
+// Função para registrar alterações no histórico - Versão simplificada
 function registrarAlteracao($conn, $registro_id, $admin_id, $campo_alterado, $valor_antigo, $valor_novo) {
     // Buscar o nome do admin na tabela usuarios
     $query_admin = "SELECT name FROM usuarios WHERE id = :admin_id";
@@ -21,17 +25,75 @@ function registrarAlteracao($conn, $registro_id, $admin_id, $campo_alterado, $va
     $stmt_admin->execute();
     $admin = $stmt_admin->fetch(PDO::FETCH_ASSOC);
     $admin_name = $admin['name'] ?? 'Desconhecido';
+    
+    // Data e hora atual
+    $data_hora = date('Y-m-d H:i:s');
+    $login = $_SESSION['username'] ?? 'sistema';
 
-    $query = "INSERT INTO historico_alteracoes (registro_id, admin_id, admin_name, campo_alterado, valor_antigo, valor_novo)
-              VALUES (:registro_id, :admin_id, :admin_name, :campo_alterado, :valor_antigo, :valor_novo)";
-    $stmt = $conn->prepare($query);
-    $stmt->bindParam(':registro_id', $registro_id);
-    $stmt->bindParam(':admin_id', $admin_id);
-    $stmt->bindParam(':admin_name', $admin_name);
-    $stmt->bindParam(':campo_alterado', $campo_alterado);
-    $stmt->bindParam(':valor_antigo', $valor_antigo);
-    $stmt->bindParam(':valor_novo', $valor_novo);
-    return $stmt->execute();
+    // Verificar tipos e converter para string se necessário
+    if (is_array($valor_antigo) || is_object($valor_antigo)) {
+        $valor_antigo = json_encode($valor_antigo, JSON_UNESCAPED_UNICODE);
+    }
+    
+    if (is_array($valor_novo) || is_object($valor_novo)) {
+        $valor_novo = json_encode($valor_novo, JSON_UNESCAPED_UNICODE);
+    }
+    
+    // Truncar valores muito longos
+    $valor_antigo = substr((string)$valor_antigo, 0, 65000);
+    $valor_novo = substr((string)$valor_novo, 0, 65000);
+
+    try {
+        $query = "INSERT INTO historico_alteracoes (registro_id, admin_id, admin_name, campo_alterado, valor_antigo, valor_novo)
+                VALUES (:registro_id, :admin_id, :admin_name, :campo_alterado, :valor_antigo, :valor_novo)";
+        $stmt = $conn->prepare($query);
+        $stmt->bindParam(':registro_id', $registro_id);
+        $stmt->bindParam(':admin_id', $admin_id);
+        $stmt->bindParam(':admin_name', $admin_name);
+        $stmt->bindParam(':campo_alterado', $campo_alterado);
+        $stmt->bindParam(':valor_antigo', $valor_antigo);
+        $stmt->bindParam(':valor_novo', $valor_novo);
+        return $stmt->execute();
+    } catch (PDOException $e) {
+        error_log("Erro ao registrar alteração: " . $e->getMessage());
+        return false;
+    }
+}
+
+// Função para registrar adição completa
+function registrarAdicaoCompleta($conn, $registro_id, $admin_id, $dados_registro) {
+    // Registrar a adição como um único registro com todos os dados
+    return registrarAlteracao($conn, $registro_id, $admin_id, 'ADICAO_COMPLETA', 'N/A', json_encode($dados_registro));
+}
+
+// Função para registrar exclusão completa
+function registrarExclusaoCompleta($conn, $registro_id, $admin_id, $dados_registro) {
+    // Registrar a exclusão como um único registro com todos os dados
+    return registrarAlteracao($conn, $registro_id, $admin_id, 'EXCLUSAO_COMPLETA', json_encode($dados_registro), 'N/A');
+}
+
+// Verificar e remover a restrição de chave estrangeira se existir
+try {
+    // Verificar se existe restrição de chave estrangeira
+    $query_check = "
+        SELECT CONSTRAINT_NAME
+        FROM information_schema.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'historico_alteracoes'
+        AND REFERENCED_TABLE_NAME = 'registros'
+        AND REFERENCED_COLUMN_NAME = 'id'
+    ";
+    $stmt_check = $conn->prepare($query_check);
+    $stmt_check->execute();
+    $constraint = $stmt_check->fetch(PDO::FETCH_ASSOC);
+    
+    if ($constraint) {
+        // Remover a restrição de chave estrangeira
+        $query_drop = "ALTER TABLE historico_alteracoes DROP FOREIGN KEY " . $constraint['CONSTRAINT_NAME'];
+        $conn->exec($query_drop);
+    }
+} catch (PDOException $e) {
+    // Ignorar erros, apenas seguir em frente
 }
 
 // Processar atualização de KM se o formulário foi enviado
@@ -42,13 +104,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['registro_id'])) {
     $admin_id = $_SESSION['user_id'];
 
     // Buscar valores atuais antes da alteração
-    $query = "SELECT km_inicial, km_final FROM registros WHERE id = :id";
+    $query = "SELECT * FROM registros WHERE id = :id";
     $stmt = $conn->prepare($query);
     $stmt->bindParam(':id', $registro_id);
     $stmt->execute();
     $registro = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if ($registro) {
+        $registro_antigo = $registro; // Salvar registro completo antes da alteração
+        
         // Atualizar os valores no banco de dados
         $query = "UPDATE registros SET km_inicial = :km_inicial, km_final = :km_final WHERE id = :id";
         $stmt = $conn->prepare($query);
@@ -57,7 +121,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['registro_id'])) {
         $stmt->bindParam(':id', $registro_id);
 
         if ($stmt->execute()) {
-            // Registrar alterações no histórico
+            // Buscar o registro atualizado
+            $query = "SELECT * FROM registros WHERE id = :id";
+            $stmt = $conn->prepare($query);
+            $stmt->bindParam(':id', $registro_id);
+            $stmt->execute();
+            $registro_novo = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            // Registrar alterações específicas
             if ($registro['km_inicial'] != $km_inicial_novo) {
                 registrarAlteracao($conn, $registro_id, $admin_id, 'km_inicial', $registro['km_inicial'], $km_inicial_novo);
             }
@@ -65,6 +136,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['registro_id'])) {
             if ($registro['km_final'] != $km_final_novo) {
                 registrarAlteracao($conn, $registro_id, $admin_id, 'km_final', $registro['km_final'], $km_final_novo);
             }
+            
+            // Registrar alteração do registro completo
+            registrarAlteracao(
+                $conn, 
+                $registro_id, 
+                $admin_id, 
+                'ALTERACAO_COMPLETA', 
+                json_encode($registro_antigo), 
+                json_encode($registro_novo)
+            );
 
             $_SESSION['mensagem'] = "Registro atualizado com sucesso!";
             $_SESSION['tipo_mensagem'] = "success";
@@ -74,6 +155,146 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['registro_id'])) {
         }
     }
 
+    header("Location: mudar_km_carro.php?" . $_SERVER['QUERY_STRING']);
+    exit;
+}
+
+// Processar adição de novo registro
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'adicionar') {
+    $nome = trim($_POST['nome']);
+    $secretaria = trim($_POST['secretaria']);
+    $veiculo_id = trim($_POST['veiculo_id']);
+    $km_inicial = floatval($_POST['km_inicial_novo']);
+    $km_final = !empty($_POST['km_final_novo']) ? floatval($_POST['km_final_novo']) : null;
+    $destino = trim($_POST['destino']);
+    $ponto_parada = !empty($_POST['ponto_parada']) ? trim($_POST['ponto_parada']) : null;
+    $data = $_POST['data'];
+    $hora = $_POST['hora'];
+    $hora_final = !empty($_POST['hora_final']) ? $_POST['hora_final'] : null;
+    $admin_id = $_SESSION['user_id'];
+    
+    // Buscar placa e nome do veículo - Usando a coluna tipo como nome_veiculo
+    $query_veiculo = "SELECT placa, tipo as nome_veiculo FROM veiculos WHERE veiculo = :veiculo_id";
+    $stmt_veiculo = $conn->prepare($query_veiculo);
+    $stmt_veiculo->bindParam(':veiculo_id', $veiculo_id);
+    $stmt_veiculo->execute();
+    $veiculo = $stmt_veiculo->fetch(PDO::FETCH_ASSOC);
+    
+    if ($veiculo) {
+        $placa = $veiculo['placa'];
+        $nome_veiculo = $veiculo['nome_veiculo'];
+        
+        try {
+            // Iniciar transação
+            $conn->beginTransaction();
+            
+            // Preparar dados do registro para inserção
+            $dados_registro = [
+                'nome' => $nome,
+                'secretaria' => $secretaria,
+                'veiculo_id' => $veiculo_id,
+                'placa' => $placa,
+                'nome_veiculo' => $nome_veiculo,
+                'km_inicial' => $km_inicial,
+                'km_final' => $km_final,
+                'destino' => $destino,
+                'ponto_parada' => $ponto_parada,
+                'data' => $data,
+                'hora' => $hora,
+                'hora_final' => $hora_final
+            ];
+            
+            // Inserir novo registro
+            $query = "INSERT INTO registros (nome, secretaria, veiculo_id, placa, nome_veiculo, km_inicial, km_final, 
+                     destino, ponto_parada, data, hora, hora_final) 
+                     VALUES (:nome, :secretaria, :veiculo_id, :placa, :nome_veiculo, :km_inicial, :km_final, 
+                     :destino, :ponto_parada, :data, :hora, :hora_final)";
+            $stmt = $conn->prepare($query);
+            
+            foreach ($dados_registro as $campo => $valor) {
+                $stmt->bindValue(':' . $campo, $valor);
+            }
+            
+            if ($stmt->execute()) {
+                $registro_id = $conn->lastInsertId();
+                
+                // Buscar o registro completo inserido
+                $query = "SELECT * FROM registros WHERE id = :id";
+                $stmt = $conn->prepare($query);
+                $stmt->bindParam(':id', $registro_id);
+                $stmt->execute();
+                $registro_inserido = $stmt->fetch(PDO::FETCH_ASSOC);
+                
+                // Registrar a adição completa no histórico
+                registrarAdicaoCompleta($conn, $registro_id, $admin_id, $registro_inserido);
+                
+                $conn->commit();
+                $_SESSION['mensagem'] = "Novo registro adicionado com sucesso!";
+                $_SESSION['tipo_mensagem'] = "success";
+            } else {
+                $conn->rollBack();
+                $_SESSION['mensagem'] = "Erro ao adicionar novo registro.";
+                $_SESSION['tipo_mensagem'] = "error";
+            }
+        } catch (PDOException $e) {
+            $conn->rollBack();
+            $_SESSION['mensagem'] = "Erro ao adicionar registro: " . $e->getMessage();
+            $_SESSION['tipo_mensagem'] = "error";
+        }
+    } else {
+        $_SESSION['mensagem'] = "Veículo não encontrado.";
+        $_SESSION['tipo_mensagem'] = "error";
+    }
+    
+    header("Location: mudar_km_carro.php?" . $_SERVER['QUERY_STRING']);
+    exit;
+}
+
+// Processar exclusão de registro
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'excluir') {
+    $registro_id = $_POST['registro_id_excluir'];
+    $admin_id = $_SESSION['user_id'];
+    
+    try {
+        // Iniciar transação
+        $conn->beginTransaction();
+        
+        // Buscar informações do registro antes de excluir
+        $query = "SELECT * FROM registros WHERE id = :id";
+        $stmt = $conn->prepare($query);
+        $stmt->bindParam(':id', $registro_id);
+        $stmt->execute();
+        $registro = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($registro) {
+            // Registrar a exclusão completa no histórico antes de excluir o registro
+            registrarExclusaoCompleta($conn, $registro_id, $admin_id, $registro);
+            
+            // Excluir o registro
+            $query = "DELETE FROM registros WHERE id = :id";
+            $stmt = $conn->prepare($query);
+            $stmt->bindParam(':id', $registro_id);
+            
+            if ($stmt->execute()) {
+                $conn->commit();
+                $_SESSION['mensagem'] = "Registro excluído com sucesso!";
+                $_SESSION['tipo_mensagem'] = "success";
+            } else {
+                $conn->rollBack();
+                $_SESSION['mensagem'] = "Erro ao excluir registro.";
+                $_SESSION['tipo_mensagem'] = "error";
+            }
+        } else {
+            $conn->rollBack();
+            $_SESSION['mensagem'] = "Registro não encontrado.";
+            $_SESSION['tipo_mensagem'] = "error";
+        }
+    } catch (PDOException $e) {
+        $conn->rollBack();
+        $_SESSION['mensagem'] = "Erro ao excluir registro: " . $e->getMessage();
+        $_SESSION['tipo_mensagem'] = "error";
+    }
+    
     header("Location: mudar_km_carro.php?" . $_SERVER['QUERY_STRING']);
     exit;
 }
@@ -112,8 +333,19 @@ function buscarRegistros($conn, $codigo_veiculo, $data_inicial, $data_final, $se
     $query .= " ORDER BY r.data DESC, r.hora DESC";
 
     $stmt = $conn->prepare($query);
-    $stmt->execute($params);
+    foreach ($params as $key => $value) {
+        $stmt->bindValue($key, $value);
+    }
+    $stmt->execute();
     return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+// Função para buscar secretarias disponíveis
+function buscarSecretarias($conn) {
+    $query = "SELECT DISTINCT secretaria FROM veiculos ORDER BY secretaria";
+    $stmt = $conn->prepare($query);
+    $stmt->execute();
+    return $stmt->fetchAll(PDO::FETCH_COLUMN);
 }
 
 // Mapeamento de secretarias
@@ -142,12 +374,19 @@ $secretarias_map = [
 ];
 
 // Secretaria do usuário logado
-$secretaria_admin = $_SESSION['secretaria'];
+$secretaria_admin = $_SESSION['secretaria'] ?? '';
 $secretaria_admin_db = isset($secretarias_map[$secretaria_admin]) ? $secretarias_map[$secretaria_admin] : null;
 $role = $_SESSION['role'] ?? '';
 
 // Buscar registros
 $registros = buscarRegistros($conn, $codigo_veiculo, $data_inicial, $data_final, $secretaria_admin_db, $role);
+
+// Buscar todas as secretarias disponíveis para o formulário de adição
+$secretarias_disponiveis = buscarSecretarias($conn);
+
+// Obter a data atual para o formulário de adição
+$data_atual = date('Y-m-d');
+$hora_atual = date('H:i');
 ?>
 
 <!DOCTYPE html>
@@ -204,13 +443,20 @@ $registros = buscarRegistros($conn, $codigo_veiculo, $data_inicial, $data_final,
             background-color: #F9FAFB;
         }
 
-        .edit-icon {
+        .edit-icon, .delete-icon {
             cursor: pointer;
-            color: #4F46E5;
             transition: all 0.2s;
         }
 
-        .edit-icon:hover {
+        .edit-icon {
+            color: #4F46E5;
+        }
+
+        .delete-icon {
+            color: #EF4444;
+        }
+
+        .edit-icon:hover, .delete-icon:hover {
             transform: scale(1.2);
         }
 
@@ -260,6 +506,30 @@ $registros = buscarRegistros($conn, $codigo_veiculo, $data_inicial, $data_final,
             background-color: #4338CA;
         }
 
+        .btn-danger {
+            background-color: #EF4444;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        .btn-danger:hover {
+            background-color: #DC2626;
+        }
+
+        .btn-secondary {
+            background-color: #6B7280;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        .btn-secondary:hover {
+            background-color: #4B5563;
+        }
+
         .success-message {
             background-color: #D1FAE5;
             color: #065F46;
@@ -284,22 +554,27 @@ $registros = buscarRegistros($conn, $codigo_veiculo, $data_inicial, $data_final,
             position: absolute;
             z-index: 1000;
             width: 100%;
-            max-height: 200px;
+            max-height: 250px;
             overflow-y: auto;
             background: white;
             border: 1px solid #ddd;
             border-radius: 4px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
             display: none;
         }
 
         .suggestion-item {
             padding: 8px 12px;
             cursor: pointer;
+            border-bottom: 1px solid #f3f3f3;
+        }
+
+        .suggestion-item:last-child {
+            border-bottom: none;
         }
 
         .suggestion-item:hover {
-            background-color: #f0f0f0;
+            background-color: #f0f7ff;
         }
     </style>
 </head>
@@ -311,6 +586,10 @@ $registros = buscarRegistros($conn, $codigo_veiculo, $data_inicial, $data_final,
                     <h1 class="text-xl font-bold">Editar Quilometragem</h1>
                 </div>
                 <div class="flex items-center space-x-4">
+                    <button onclick="abrirModalAdicao()" class="flex items-center space-x-2 bg-white/20 hover:bg-white/30 px-4 py-2 rounded-lg transition mr-2">
+                        <i class="fas fa-plus"></i>
+                        <span>Novo Registro</span>
+                    </button>
                     <a href="<?= $_SESSION['role'] === 'geraladm' ? 'geral_adm.php' : 'admin.php' ?>"
                     class="flex items-center space-x-2 bg-white/20 hover:bg-white/30 px-4 py-2 rounded-lg transition"
                     aria-label="Voltar">
@@ -393,7 +672,7 @@ $registros = buscarRegistros($conn, $codigo_veiculo, $data_inicial, $data_final,
                                     <td><?= htmlspecialchars($registro['km_inicial']) ?></td>
                                     <td><?= htmlspecialchars($registro['km_final']) ?></td>
                                     <td><?= $km_percorrido ?></td>
-                                    <td>
+                                    <td class="flex space-x-2">
                                         <i class="fas fa-pencil-alt edit-icon"
                                            onclick="abrirModalEdicao(
                                                '<?= $registro['id'] ?>',
@@ -401,6 +680,13 @@ $registros = buscarRegistros($conn, $codigo_veiculo, $data_inicial, $data_final,
                                                '<?= $registro['km_final'] ?>',
                                                '<?= $registro['veiculo'] ?>',
                                                '<?= $registro['data'] ?>'
+                                           )"></i>
+                                        <i class="fas fa-trash-alt delete-icon"
+                                           onclick="abrirModalExclusao(
+                                               '<?= $registro['id'] ?>',
+                                               '<?= $registro['veiculo'] ?>',
+                                               '<?= $registro['data'] ?>',
+                                               '<?= $registro['nome'] ?>'
                                            )"></i>
                                     </td>
                                 </tr>
@@ -459,6 +745,132 @@ $registros = buscarRegistros($conn, $codigo_veiculo, $data_inicial, $data_final,
         </div>
     </div>
 
+    <!-- Modal de Exclusão -->
+    <div id="modalExclusao" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="fecharModalExclusao()">&times;</span>
+            <h2 class="text-xl font-semibold mb-4">Confirmar Exclusão</h2>
+            <form id="formExclusao" method="post">
+                <input type="hidden" name="action" value="excluir">
+                <input type="hidden" id="registro_id_excluir" name="registro_id_excluir">
+
+                <div class="mb-4">
+                    <p class="text-sm text-gray-600 mb-1">Deseja realmente excluir este registro?</p>
+                    <p id="exclusao_veiculo" class="font-medium"></p>
+                    <p id="exclusao_data" class="font-medium"></p>
+                    <p id="exclusao_motorista" class="font-medium"></p>
+                </div>
+
+                <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-4">
+                    <div class="flex">
+                        <div class="flex-shrink-0">
+                            <i class="fas fa-exclamation-triangle text-yellow-400"></i>
+                        </div>
+                        <div class="ml-3">
+                            <p class="text-sm text-yellow-700">
+                                Esta ação não pode ser desfeita. Todos os dados associados a este registro serão permanentemente removidos.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-end space-x-2">
+                    <button type="button" onclick="fecharModalExclusao()" class="px-4 py-2 border rounded-md">
+                        Cancelar
+                    </button>
+                    <button type="submit" class="btn-danger">
+                        <i class="fas fa-trash-alt mr-2"></i> Excluir
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal de Adição -->
+    <div id="modalAdicao" class="modal">
+        <div class="modal-content" style="max-width: 700px;">
+            <span class="close" onclick="fecharModalAdicao()">&times;</span>
+            <h2 class="text-xl font-semibold mb-4">Adicionar Novo Registro</h2>
+            <form id="formAdicao" method="post">
+                <input type="hidden" name="action" value="adicionar">
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div class="suggestions-container">
+                        <label for="nome" class="block text-sm font-medium text-gray-700 mb-2">Nome do Motorista</label>
+                        <input type="text" id="nome" name="nome" class="w-full px-3 py-2 border rounded-md" 
+                               placeholder="Digite nome, CPF ou email" required oninput="buscarUsuarios(this.value)">
+                        <input type="hidden" id="usuario_id" name="usuario_id" value="">
+                        <div id="suggestions_usuarios" class="suggestions-list"></div>
+                    </div>
+                    <div>
+                        <label for="secretaria" class="block text-sm font-medium text-gray-700 mb-2">Secretaria</label>
+                        <select id="secretaria" name="secretaria" class="w-full px-3 py-2 border rounded-md" required>
+                            <option value="">Selecione a secretaria</option>
+                            <?php foreach ($secretarias_disponiveis as $secretaria): ?>
+                                <option value="<?= htmlspecialchars($secretaria) ?>"><?= htmlspecialchars($secretaria) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div class="suggestions-container">
+                        <label for="veiculo_id" class="block text-sm font-medium text-gray-700 mb-2">Código do Veículo</label>
+                        <input type="text" id="veiculo_id" name="veiculo_id" class="w-full px-3 py-2 border rounded-md" 
+                               placeholder="Ex: C-32" required oninput="buscarVeiculosAdicao(this.value)">
+                        <div id="suggestions_adicao" class="suggestions-list"></div>
+                    </div>
+                    <div>
+                        <label for="destino" class="block text-sm font-medium text-gray-700 mb-2">Destino</label>
+                        <input type="text" id="destino" name="destino" class="w-full px-3 py-2 border rounded-md" required>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label for="ponto_parada" class="block text-sm font-medium text-gray-700 mb-2">Ponto de Parada (opcional)</label>
+                        <input type="text" id="ponto_parada" name="ponto_parada" class="w-full px-3 py-2 border rounded-md">
+                    </div>
+                    <div>
+                        <label for="data" class="block text-sm font-medium text-gray-700 mb-2">Data</label>
+                        <input type="date" id="data" name="data" class="w-full px-3 py-2 border rounded-md" 
+                               value="<?= $data_atual ?>" required>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                    <div>
+                        <label for="hora" class="block text-sm font-medium text-gray-700 mb-2">Hora Inicial</label>
+                        <input type="time" id="hora" name="hora" class="w-full px-3 py-2 border rounded-md" 
+                               value="<?= $hora_atual ?>" required>
+                    </div>
+                    <div>
+                        <label for="hora_final" class="block text-sm font-medium text-gray-700 mb-2">Hora Final (opcional)</label>
+                        <input type="time" id="hora_final" name="hora_final" class="w-full px-3 py-2 border rounded-md">
+                    </div>
+                    <div>
+                        <label for="km_inicial_novo" class="block text-sm font-medium text-gray-700 mb-2">KM Inicial</label>
+                        <input type="number" id="km_inicial_novo" name="km_inicial_novo" class="w-full px-3 py-2 border rounded-md" required>
+                    </div>
+                </div>
+
+                <div class="mb-4">
+                    <label for="km_final_novo" class="block text-sm font-medium text-gray-700 mb-2">KM Final (opcional)</label>
+                    <input type="number" id="km_final_novo" name="km_final_novo" class="w-full px-3 py-2 border rounded-md">
+                </div>
+
+                <div class="flex justify-end space-x-2">
+                    <button type="button" onclick="fecharModalAdicao()" class="px-4 py-2 border rounded-md">
+                        Cancelar
+                    </button>
+                    <button type="submit" class="btn-primary">
+                        <i class="fas fa-plus mr-2"></i> Adicionar
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script>
         // Funções para o modal de edição
         function abrirModalEdicao(id, km_inicial, km_final, veiculo, data) {
@@ -475,10 +887,39 @@ $registros = buscarRegistros($conn, $codigo_veiculo, $data_inicial, $data_final,
             document.getElementById('modalEdicao').style.display = 'none';
         }
 
-        // Fechar o modal se clicar fora dele
+        // Funções para o modal de exclusão
+        function abrirModalExclusao(id, veiculo, data, motorista) {
+            document.getElementById('registro_id_excluir').value = id;
+            document.getElementById('exclusao_veiculo').textContent = 'Veículo: ' + veiculo;
+            document.getElementById('exclusao_data').textContent = 'Data: ' + data;
+            document.getElementById('exclusao_motorista').textContent = 'Motorista: ' + motorista;
+
+            document.getElementById('modalExclusao').style.display = 'block';
+        }
+
+        function fecharModalExclusao() {
+            document.getElementById('modalExclusao').style.display = 'none';
+        }
+
+        // Funções para o modal de adição
+        function abrirModalAdicao() {
+            document.getElementById('modalAdicao').style.display = 'block';
+        }
+
+        function fecharModalAdicao() {
+            document.getElementById('modalAdicao').style.display = 'none';
+        }
+
+        // Fechar os modais se clicar fora deles
         window.onclick = function(event) {
             if (event.target == document.getElementById('modalEdicao')) {
                 fecharModalEdicao();
+            }
+            if (event.target == document.getElementById('modalExclusao')) {
+                fecharModalExclusao();
+            }
+            if (event.target == document.getElementById('modalAdicao')) {
+                fecharModalAdicao();
             }
         }
 
@@ -515,10 +956,103 @@ $registros = buscarRegistros($conn, $codigo_veiculo, $data_inicial, $data_final,
             $('#suggestions').hide();
         }
 
+        // Função para buscar veículos por prefixo para o modal de adição
+        function buscarVeiculosAdicao(prefixo) {
+            if (prefixo.length >= 1) {
+                $.get('buscar_veiculos.php', { termo: prefixo }, function(data) {
+                    const suggestions = $('#suggestions_adicao');
+                    suggestions.empty();
+
+                    if (data.length > 0) {
+                        data.forEach(function(veiculo) {
+                            suggestions.append(
+                                `<div class="suggestion-item" onclick="selecionarVeiculoAdicao('${veiculo.veiculo}', '${veiculo.secretaria}')">
+                                    ${veiculo.veiculo} - ${veiculo.placa} (${veiculo.tipo})
+                                 </div>`
+                            );
+                        });
+                        suggestions.show();
+                    } else {
+                        suggestions.hide();
+                    }
+                }).fail(function() {
+                    $('#suggestions_adicao').hide();
+                });
+            } else {
+                $('#suggestions_adicao').hide();
+            }
+        }
+
+        // Função para selecionar um veículo da lista de sugestões para o modal de adição
+        function selecionarVeiculoAdicao(veiculo, secretaria) {
+            $('#veiculo_id').val(veiculo);
+            $('#suggestions_adicao').hide();
+            
+            // Preencher a secretaria automaticamente se disponível
+            if (secretaria) {
+                $('#secretaria').val(secretaria);
+            }
+            
+            // Buscar último KM registrado para esse veículo
+            $.get('buscar_ultimo_km.php', { veiculo_id: veiculo }, function(data) {
+                if (data && data.km_final) {
+                    $('#km_inicial_novo').val(data.km_final);
+                }
+            });
+        }
+
+        // Função para buscar usuários - VERSÃO SIMPLIFICADA
+        function buscarUsuarios(termo) {
+            console.log("Buscando usuários com termo: " + termo);
+            
+            if (termo.length >= 2) {
+                $.ajax({
+                    url: 'buscar_usuarios.php',
+                    type: 'GET',
+                    data: { termo: termo },
+                    dataType: 'json',
+                    success: function(data) {
+                        console.log("Dados recebidos:", data);
+                        
+                        const suggestions = $('#suggestions_usuarios');
+                        suggestions.empty();
+
+                        if (data && data.length > 0) {
+                            data.forEach(function(usuario) {
+                                suggestions.append(
+                                    `<div class="suggestion-item" onclick="selecionarUsuario('${usuario.name}')">
+                                        ${usuario.name}
+                                     </div>`
+                                );
+                            });
+                            suggestions.show();
+                        } else {
+                            suggestions.hide();
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        console.error("Erro na busca de usuários:", error);
+                        console.error("Status:", status);
+                        console.error("Resposta:", xhr.responseText);
+                        $('#suggestions_usuarios').hide();
+                    }
+                });
+            } else {
+                $('#suggestions_usuarios').hide();
+            }
+        }
+
+        // Função simplificada para selecionar um usuário
+        function selecionarUsuario(nome) {
+            console.log("Selecionando usuário:", nome);
+            $('#nome').val(nome);
+            $('#suggestions_usuarios').hide();
+        }
+
         // Esconder sugestões quando clicar em outro lugar
         $(document).click(function(event) {
             if (!$(event.target).closest('.suggestions-container').length) {
-                $('#suggestions').hide();
+                $('.suggestions-list').hide();
             }
         });
     </script>
