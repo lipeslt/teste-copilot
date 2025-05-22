@@ -1,8 +1,15 @@
 <?php
 session_start();
 require 'conexao.php';
-?>
 
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'geraladm') {
+    echo json_encode(['success' => false, 'message' => 'Acesso restrito a administradores gerais']);
+    exit;
+}
+
+// Obter nome do usuário logado
+$nomeUsuario = $_SESSION['name'] ?? 'Administrador';
+?>
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -39,6 +46,12 @@ require 'conexao.php';
                     <span class="bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-0.5 rounded-full">
                         <?php echo $_SESSION['role'] === 'geraladm' ? 'Admin Geral' : 'Administrador'; ?>
                     </span>
+                    <span class="text-xs text-gray-500">
+                        <i class="fas fa-user mr-1"></i> <?php echo htmlspecialchars($nomeUsuario); ?>
+                    </span>
+                    <a href="historico_bloqueio.php" class="text-xs text-gray-500 hover:text-blue-500 transition-colors">
+                        <i class="fas fa-history mr-1"></i> Histórico
+                    </a>
                     <span class="hidden sm:inline-flex items-center text-xs text-gray-500">
                         <i class="far fa-clock mr-1"></i> <?php echo date('d/m/Y H:i'); ?>
                     </span>
@@ -197,18 +210,24 @@ require 'conexao.php';
             document.getElementById('btnProximo').disabled = true;
             document.getElementById('btnBuscar').disabled = true;
             
-            fetch(`buscar_veiculos.php?termo=${encodeURIComponent(termoAtual)}&page=${paginaAtual}`)
-                .then(response => response.json())
+            fetch(`buscar_veiculos_bloqueio.php?termo=${encodeURIComponent(termoAtual)}&page=${paginaAtual}`)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Erro na resposta do servidor');
+                    }
+                    return response.json();
+                })
                 .then(data => {
                     loadingState.classList.add('hidden');
                     document.getElementById('btnBuscar').disabled = false;
                     
-                    if (!data || data.length === 0) {
+                    if (!data.data || data.data.length === 0) {
                         emptyState.classList.remove('hidden');
                         totalVeiculos = 0;
                     } else {
-                        renderizarVeiculos(data);
-                        totalVeiculos = data.length;
+                        renderizarVeiculos(data.data);
+                        totalVeiculos = data.total;
+                        totalPaginas = data.paginas;
                     }
                     
                     atualizarControles();
@@ -328,7 +347,12 @@ require 'conexao.php';
                 },
                 body: JSON.stringify({ id: veiculoId, status: novoStatus })
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Erro na resposta do servidor');
+                }
+                return response.json();
+            })
             .then(data => {
                 if (data.success) {
                     mostrarNotificacao(
