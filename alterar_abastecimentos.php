@@ -106,7 +106,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['registro_id']) && !is
         $registro_id = $_POST['registro_id'];
         $nome = trim($_POST['nome']);
         $data = $_POST['data'];
-        $hora = $_POST['hora'];
+        // Garantir que a hora esteja no formato correto
+        $hora = date('H:i', strtotime($_POST['hora']));
+        
+        // Validação da hora
+        if (!preg_match('/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/', $hora)) {
+            throw new Exception("Formato de hora inválido. Use HH:MM (ex: 07:30)");
+        }
+        
         $km_abastecido = !empty($_POST['km_abastecido']) ? intval($_POST['km_abastecido']) : null;
         $litros = floatval(str_replace(',', '.', $_POST['litros']));
         $combustivel = trim($_POST['combustivel']);
@@ -123,6 +130,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['registro_id']) && !is
         // Validação dos dados
         if (empty($nome) || empty($data) || empty($hora) || empty($litros) || empty($combustivel) || empty($valor)) {
             throw new Exception("Todos os campos obrigatórios devem ser preenchidos.");
+        }
+
+        // Validar que o combustível é um dos valores permitidos
+        $combustiveis_validos = ['Gasolina', 'Etanol', 'Diesel-S10', 'Diesel-S500'];
+        if (!in_array($combustivel, $combustiveis_validos)) {
+            throw new Exception("Tipo de combustível inválido. Escolha entre: Gasolina, Etanol, Diesel-S10 ou Diesel-S500.");
         }
 
         // Buscar valores atuais antes da alteração
@@ -209,7 +222,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
         $nome = isset($_POST['nome']) ? trim($_POST['nome']) : '';
         $data = isset($_POST['data']) ? $_POST['data'] : '';
-        $hora = isset($_POST['hora']) ? $_POST['hora'] : '';
+        // Garantir que a hora esteja no formato correto
+        $hora = isset($_POST['hora']) ? date('H:i', strtotime($_POST['hora'])) : '';
+        
+        // Validação da hora
+        if (!preg_match('/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/', $hora)) {
+            throw new Exception("Formato de hora inválido. Use HH:MM (ex: 07:30)");
+        }
+        
         $prefixo = isset($_POST['prefixo']) && !empty($_POST['prefixo']) ? trim($_POST['prefixo']) : null;
         $placa = isset($_POST['placa']) ? trim($_POST['placa']) : '';
         $veiculo = isset($_POST['veiculo']) ? trim($_POST['veiculo']) : '';
@@ -241,6 +261,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         // Se houver campos faltando, lança exceção com a lista
         if (!empty($campos_faltando)) {
             throw new Exception("Por favor, preencha os seguintes campos obrigatórios: " . implode(", ", $campos_faltando));
+        }
+
+        // Validar que o combustível é um dos valores permitidos
+        $combustiveis_validos = ['Gasolina', 'Etanol', 'Diesel-S10', 'Diesel-S500'];
+        if (!in_array($combustivel, $combustiveis_validos)) {
+            throw new Exception("Tipo de combustível inválido. Escolha entre: Gasolina, Etanol, Diesel-S10 ou Diesel-S500.");
         }
         
         // Iniciar transação
@@ -488,7 +514,7 @@ function buscarSecretarias() {
 
 // Função para buscar combustíveis disponíveis
 function buscarCombustiveis() {
-    // Retornar apenas os combustíveis enumerados
+    // Retornar exatamente os combustíveis especificados
     return ['Gasolina', 'Etanol', 'Diesel-S10', 'Diesel-S500'];
 }
 
@@ -514,7 +540,7 @@ $secretarias_map = [
     "Procuradoria Geral do Município" => "PROCURADORIA GERAL",
     "Secretaria Municipal de Cultura" => "SECRETARIA DE CULTURA",
     "Secretaria Municipal de Planejamento, Ciência, Tecnologia e Inovação" => "SECRETARIA DE PLANEJAMENTO E TECNOLOGIA",
-    "Secretaria Municipal de Obras e Serviços Públicos" => "SECRETARIA DE OBRAS E SERVIÇOS PÚBLICOS",
+    "Secretaria Municipal de Obras e Serviços Públicos" => "SECRETARIA DE OBRAS E SERVIÇOS PÚBLICOS"
 ];
 
 // Secretaria do usuário logado
@@ -1203,7 +1229,8 @@ $hora_atual = date('H:i');
                     </div>
                     <div>
                         <label for="modal_hora" class="block text-sm font-medium text-gray-700 mb-2">Hora</label>
-                        <input type="time" id="modal_hora" name="hora" class="w-full px-3 py-2 border rounded-md" required>
+                        <input type="time" id="modal_hora" name="hora" class="w-full px-3 py-2 border rounded-md" 
+                               required pattern="[0-9]{2}:[0-9]{2}" title="Formato deve ser HH:MM (ex: 07:30)">
                     </div>
                 </div>
 
@@ -1220,7 +1247,8 @@ $hora_atual = date('H:i');
                 
                 <div class="mb-4">
                     <label for="modal_combustivel" class="block text-sm font-medium text-gray-700 mb-2">Combustível</label>
-                    <select id="modal_combustivel" name="combustivel" class="w-full px-3 py-2 border rounded-md" required>
+                    <select id="modal_combustivel" name="combustivel" class="w-full px-3 py-2 border rounded-md"                    <select id="modal_combustivel" name="combustivel" class="w-full px-3 py-2 border rounded-md" required>
+                        <option value="">Selecione o combustível</option>
                         <option value="Gasolina">Gasolina</option>
                         <option value="Etanol">Etanol</option>
                         <option value="Diesel-S10">Diesel-S10</option>
@@ -1240,7 +1268,7 @@ $hora_atual = date('H:i');
                         <option value="MELOSA TRANSPORTES">MELOSA TRANSPORTES</option>
                         <option value="POSTO MORADA">B&M - POSTO MORADA</option>
                         <option value="BRESCANSIN & BRESCANSIN LTDA">SMILLE - BRESCANSIN & BRESCANSIN LTDA</option>
-                        <option value="outro                        <option value="outro">Outro (especificar)</option>
+                        <option value="outro">Outro (especificar)</option>
                     </select>
                     <div id="outro_posto_modal_container" class="mt-2" style="display: none;">
                         <input type="text" id="outro_posto_modal" class="w-full px-3 py-2 border rounded-md" 
@@ -1367,7 +1395,8 @@ $hora_atual = date('H:i');
                     <div>
                         <label for="hora" class="block text-sm font-medium text-gray-700 mb-2">Hora <span class="text-red-500">*</span></label>
                         <input type="time" id="hora" name="hora" class="w-full px-3 py-2 border rounded-md" 
-                               value="<?= $hora_atual ?>" required>
+                               value="<?= $hora_atual ?>" required pattern="[0-9]{2}:[0-9]{2}" 
+                               title="Formato deve ser HH:MM (ex: 07:30)">
                     </div>
                 </div>
 
@@ -1452,9 +1481,14 @@ $hora_atual = date('H:i');
             document.getElementById('registro_id').value = id;
             document.getElementById('modal_nome').value = nome;
             document.getElementById('modal_data').value = data;
-            document.getElementById('modal_hora').value = hora;
+            document.getElementById('modal_hora').value = formatarHora(hora);
             document.getElementById('modal_km_abastecido').value = km_abastecido;
             document.getElementById('modal_litros').value = litros;
+            
+            // Garantir que combustível tenha um valor válido
+            if (!combustivel || combustivel === '') {
+                combustivel = 'Gasolina'; // Valor padrão se estiver vazio
+            }
             document.getElementById('modal_combustivel').value = combustivel;
             
             // Verificar se o posto de gasolina está na lista predefinida
@@ -1485,10 +1519,32 @@ $hora_atual = date('H:i');
             document.getElementById('modal_nota_fiscal').value = nota_fiscal;
 
             document.getElementById('modalEdicao').style.display = 'block';
+            
+            // Verificar se o combustível foi selecionado corretamente
+            console.log("Combustível selecionado:", document.getElementById('modal_combustivel').value);
         }
 
         function fecharModalEdicao() {
             document.getElementById('modalEdicao').style.display = 'none';
+        }
+
+        // Função para formatar a hora
+        function formatarHora(hora) {
+            // Se a hora já estiver no formato HH:MM, retorna sem alteração
+            if (/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/.test(hora)) {
+                return hora;
+            }
+            
+            // Tenta converter para HH:MM
+            const partes = hora.split(':');
+            if (partes.length >= 2) {
+                const horas = partes[0].padStart(2, '0');
+                const minutos = partes[1].padStart(2, '0');
+                return `${horas}:${minutos}`;
+            }
+            
+            // Se não conseguir converter, retorna hora atual como padrão
+            return new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
         }
 
         // Funções para o modal de exclusão
@@ -1514,6 +1570,8 @@ $hora_atual = date('H:i');
 
         // Funções para o modal de adição
         function abrirModalAdicao() {
+            // Garantir que o combustível tenha um valor padrão selecionado
+            document.getElementById('combustivel').value = 'Gasolina';
             document.getElementById('modalAdicao').style.display = 'block';
         }
 
@@ -1770,9 +1828,16 @@ $hora_atual = date('H:i');
             }
         });
 
-        // Ajustar o formEdicao para lidar com campo "outro posto"
+        // Ajustar o formEdicao para lidar com campo "outro posto" e garantir seleção de combustível
         $("#formEdicao").on("submit", function(e) {
             console.log("Formulário de edição sendo enviado");
+            
+            // Verificar se um combustível foi selecionado
+            var combustivel = $('#modal_combustivel').val();
+            if (!combustivel || combustivel === '') {
+                $('#modal_combustivel').val('Gasolina'); // Define um valor padrão
+                console.log("Combustível não selecionado, definindo como Gasolina");
+            }
             
             if ($('#modal_posto_gasolina').val() === 'outro' && $('#outro_posto_modal').val().trim() !== '') {
                 // Substituir o valor do posto_gasolina pelo valor digitado em outro_posto_modal
@@ -1780,7 +1845,7 @@ $hora_atual = date('H:i');
             }
             
             // Verificação adicional dos campos obrigatórios
-            let camposObrigatorios = ['modal_nome', 'modal_data', 'modal_hora', 'modal_litros', 'modal_combustivel', 'modal_valor'];
+            let camposObrigatorios = ['modal_nome', 'modal_data', 'modal_hora', 'modal_litros', 'modal_valor'];
             let temErro = false;
             let camposFaltantes = [];
             
@@ -1798,6 +1863,15 @@ $hora_atual = date('H:i');
                     elemento.classList.remove('border-red-500');
                 }
             });
+
+            // Verificar especificamente o campo de combustível
+            if (!$('#modal_combustivel').val()) {
+                $('#modal_combustivel').addClass('border-red-500');
+                temErro = true;
+                camposFaltantes.push('Combustível');
+            } else {
+                $('#modal_combustivel').removeClass('border-red-500');
+            }
             
             if (temErro) {
                 e.preventDefault();
@@ -1809,9 +1883,16 @@ $hora_atual = date('H:i');
             return true;
         });
 
-        // Ajustar o formAdicao para lidar com campo "outro posto"
+        // Ajustar o formAdicao para lidar com campo "outro posto" e garantir seleção de combustível
         $("#formAdicao").on("submit", function(e) {
             console.log("Formulário de adição sendo enviado");
+            
+            // Verificar se um combustível foi selecionado
+            var combustivel = $('#combustivel').val();
+            if (!combustivel || combustivel === '') {
+                $('#combustivel').val('Gasolina'); // Define um valor padrão
+                console.log("Combustível não selecionado, definindo como Gasolina");
+            }
             
             // Verificar se o posto de gasolina é "outro" e ajustar o valor
             if ($('#posto_gasolina').val() === 'outro' && $('#outro_posto').val().trim() !== '') {
@@ -1820,7 +1901,7 @@ $hora_atual = date('H:i');
             }
             
             // Verificação adicional dos campos obrigatórios
-            let camposObrigatorios = ['nome', 'prefixo', 'placa', 'veiculo', 'data', 'hora', 'litros', 'combustivel', 'valor'];
+            let camposObrigatorios = ['nome', 'prefixo', 'placa', 'veiculo', 'data', 'hora', 'litros', 'valor'];
             let temErro = false;
             let camposFaltantes = [];
             
@@ -1838,6 +1919,15 @@ $hora_atual = date('H:i');
                     elemento.classList.remove('border-red-500');
                 }
             });
+
+            // Verificar especificamente o campo de combustível
+            if (!$('#combustivel').val()) {
+                $('#combustivel').addClass('border-red-500');
+                temErro = true;
+                camposFaltantes.push('Combustível');
+            } else {
+                $('#combustivel').removeClass('border-red-500');
+            }
             
             if (temErro) {
                 e.preventDefault();
@@ -1860,6 +1950,10 @@ $hora_atual = date('H:i');
         $(document).ready(function() {
             console.log("Página carregada. Usuário: <?= $usuario_logado ?>, Data: <?= date('Y-m-d H:i:s') ?>");
             console.log("Verificando se os scripts de busca estão funcionando...");
+            
+            // Definir valor padrão para os campos de combustível
+            $('#modal_combustivel').val('Gasolina');
+            $('#combustivel').val('Gasolina');
             
             // Tentativa inicial de busca para verificar se estão funcionando os arquivos
             $.ajax({
