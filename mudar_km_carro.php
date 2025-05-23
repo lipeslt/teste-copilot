@@ -16,8 +16,8 @@ $conn->exec("SET NAMES utf8");
 $usuario_logado = $_SESSION['username'] ?? 'desconhecido';
 $data_hora_atual = date('Y-m-d H:i:s');
 
-// Função para registrar alterações no histórico - Versão simplificada
-function registrarAlteracao($conn, $registro_id, $admin_id, $campo_alterado, $valor_antigo, $valor_novo) {
+// Função para registrar alterações no histórico
+function registrarAlteracao($conn, $registro_id, $admin_id, $campo_alterado, $valor_antigo, $valor_novo, $tipo_operacao = 'ALTERACAO', $registro_completo = null) {
     // Buscar o nome do admin na tabela usuarios
     $query_admin = "SELECT name FROM usuarios WHERE id = :admin_id";
     $stmt_admin = $conn->prepare($query_admin);
@@ -25,12 +25,12 @@ function registrarAlteracao($conn, $registro_id, $admin_id, $campo_alterado, $va
     $stmt_admin->execute();
     $admin = $stmt_admin->fetch(PDO::FETCH_ASSOC);
     $admin_name = $admin['name'] ?? 'Desconhecido';
-    
-    // Data e hora atual
-    $data_hora = date('Y-m-d H:i:s');
-    $login = $_SESSION['username'] ?? 'sistema';
 
-    // Verificar tipos e converter para string se necessário
+    // Truncar valores se necessário para caber no campo
+    $valor_antigo = is_string($valor_antigo) ? substr($valor_antigo, 0, 65000) : $valor_antigo;
+    $valor_novo = is_string($valor_novo) ? substr($valor_novo, 0, 65000) : $valor_novo;
+    
+    // Converter arrays ou objetos para JSON
     if (is_array($valor_antigo) || is_object($valor_antigo)) {
         $valor_antigo = json_encode($valor_antigo, JSON_UNESCAPED_UNICODE);
     }
@@ -39,37 +39,61 @@ function registrarAlteracao($conn, $registro_id, $admin_id, $campo_alterado, $va
         $valor_novo = json_encode($valor_novo, JSON_UNESCAPED_UNICODE);
     }
     
-    // Truncar valores muito longos
-    $valor_antigo = substr((string)$valor_antigo, 0, 65000);
-    $valor_novo = substr((string)$valor_novo, 0, 65000);
-
-    try {
-        $query = "INSERT INTO historico_alteracoes (registro_id, admin_id, admin_name, campo_alterado, valor_antigo, valor_novo)
-                VALUES (:registro_id, :admin_id, :admin_name, :campo_alterado, :valor_antigo, :valor_novo)";
-        $stmt = $conn->prepare($query);
-        $stmt->bindParam(':registro_id', $registro_id);
-        $stmt->bindParam(':admin_id', $admin_id);
-        $stmt->bindParam(':admin_name', $admin_name);
-        $stmt->bindParam(':campo_alterado', $campo_alterado);
-        $stmt->bindParam(':valor_antigo', $valor_antigo);
-        $stmt->bindParam(':valor_novo', $valor_novo);
-        return $stmt->execute();
-    } catch (PDOException $e) {
-        error_log("Erro ao registrar alteração: " . $e->getMessage());
-        return false;
-    }
+    // Preparar a query para inserção no histórico de alterações
+    $query = "INSERT INTO historico_alteracoes (registro_id, admin_id, admin_name, campo_alterado, valor_antigo, valor_novo, tipo_operacao, registro_completo)
+              VALUES (:registro_id, :admin_id, :admin_name, :campo_alterado, :valor_antigo, :valor_novo, :tipo_operacao, :registro_completo)";
+    
+    $stmt = $conn->prepare($query);
+    $stmt->bindParam(':registro_id', $registro_id);
+    $stmt->bindParam(':admin_id', $admin_id);
+    $stmt->bindParam(':admin_name', $admin_name);
+    $stmt->bindParam(':campo_alterado', $campo_alterado);
+    $stmt->bindParam(':valor_antigo', $valor_antigo);
+    $stmt->bindParam(':valor_novo', $valor_novo);
+    $stmt->bindParam(':tipo_operacao', $tipo_operacao);
+    $stmt->bindParam(':registro_completo', $registro_completo);
+    
+    return $stmt->execute();
 }
 
-// Função para registrar adição completa
+// Função para registrar a adição completa de um registro
 function registrarAdicaoCompleta($conn, $registro_id, $admin_id, $dados_registro) {
-    // Registrar a adição como um único registro com todos os dados
-    return registrarAlteracao($conn, $registro_id, $admin_id, 'ADICAO_COMPLETA', 'N/A', json_encode($dados_registro));
+    global $usuario_logado, $data_hora_atual;
+    
+    // Converter o registro completo para JSON
+    $registro_completo = json_encode($dados_registro, JSON_UNESCAPED_UNICODE);
+    
+    // Registrar a adição como um único registro no histórico
+    registrarAlteracao(
+        $conn, 
+        $registro_id, 
+        $admin_id, 
+        'REGISTRO_COMPLETO', 
+        'N/A', 
+        'Registro adicionado', 
+        'ADICAO', 
+        $registro_completo
+    );
 }
 
-// Função para registrar exclusão completa
+// Função para registrar a exclusão completa de um registro
 function registrarExclusaoCompleta($conn, $registro_id, $admin_id, $dados_registro) {
-    // Registrar a exclusão como um único registro com todos os dados
-    return registrarAlteracao($conn, $registro_id, $admin_id, 'EXCLUSAO_COMPLETA', json_encode($dados_registro), 'N/A');
+    global $usuario_logado, $data_hora_atual;
+    
+    // Converter o registro completo para JSON
+    $registro_completo = json_encode($dados_registro, JSON_UNESCAPED_UNICODE);
+    
+    // Registrar a exclusão como um único registro no histórico
+    registrarAlteracao(
+        $conn, 
+        $registro_id, 
+        $admin_id, 
+        'REGISTRO_COMPLETO', 
+        'Registro excluído', 
+        'N/A', 
+        'EXCLUSAO', 
+        $registro_completo
+    );
 }
 
 // Verificar e remover a restrição de chave estrangeira se existir
@@ -130,21 +154,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['registro_id'])) {
             
             // Registrar alterações específicas
             if ($registro['km_inicial'] != $km_inicial_novo) {
-                registrarAlteracao($conn, $registro_id, $admin_id, 'km_inicial', $registro['km_inicial'], $km_inicial_novo);
+                registrarAlteracao($conn, $registro_id, $admin_id, 'km_inicial', $registro['km_inicial'], $km_inicial_novo, 'ALTERACAO');
             }
 
             if ($registro['km_final'] != $km_final_novo) {
-                registrarAlteracao($conn, $registro_id, $admin_id, 'km_final', $registro['km_final'], $km_final_novo);
+                registrarAlteracao($conn, $registro_id, $admin_id, 'km_final', $registro['km_final'], $km_final_novo, 'ALTERACAO');
             }
             
             // Registrar alteração do registro completo
+            $registro_completo = json_encode([
+                'antes' => $registro_antigo,
+                'depois' => $registro_novo
+            ], JSON_UNESCAPED_UNICODE);
+            
             registrarAlteracao(
                 $conn, 
                 $registro_id, 
                 $admin_id, 
-                'ALTERACAO_COMPLETA', 
-                json_encode($registro_antigo), 
-                json_encode($registro_novo)
+                'REGISTRO_COMPLETO', 
+                json_encode($registro_antigo, JSON_UNESCAPED_UNICODE), 
+                json_encode($registro_novo, JSON_UNESCAPED_UNICODE), 
+                'ALTERACAO',
+                $registro_completo
             );
 
             $_SESSION['mensagem'] = "Registro atualizado com sucesso!";
@@ -161,88 +192,100 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['registro_id'])) {
 
 // Processar adição de novo registro
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'adicionar') {
-    $nome = trim($_POST['nome']);
-    $secretaria = trim($_POST['secretaria']);
-    $veiculo_id = trim($_POST['veiculo_id']);
-    $km_inicial = floatval($_POST['km_inicial_novo']);
-    $km_final = !empty($_POST['km_final_novo']) ? floatval($_POST['km_final_novo']) : null;
-    $destino = trim($_POST['destino']);
-    $ponto_parada = !empty($_POST['ponto_parada']) ? trim($_POST['ponto_parada']) : null;
-    $data = $_POST['data'];
-    $hora = $_POST['hora'];
-    $hora_final = !empty($_POST['hora_final']) ? $_POST['hora_final'] : null;
-    $admin_id = $_SESSION['user_id'];
-    
-    // Buscar placa e nome do veículo - Usando a coluna tipo como nome_veiculo
-    $query_veiculo = "SELECT placa, tipo as nome_veiculo FROM veiculos WHERE veiculo = :veiculo_id";
-    $stmt_veiculo = $conn->prepare($query_veiculo);
-    $stmt_veiculo->bindParam(':veiculo_id', $veiculo_id);
-    $stmt_veiculo->execute();
-    $veiculo = $stmt_veiculo->fetch(PDO::FETCH_ASSOC);
-    
-    if ($veiculo) {
+    try {
+        $nome = trim($_POST['nome']);
+        $secretaria = trim($_POST['secretaria']);
+        $veiculo_id = trim($_POST['veiculo_id']);
+        $km_inicial = floatval($_POST['km_inicial_novo']);
+        $km_final = !empty($_POST['km_final_novo']) ? floatval($_POST['km_final_novo']) : null;
+        $destino = trim($_POST['destino']);
+        $ponto_parada = !empty($_POST['ponto_parada']) ? trim($_POST['ponto_parada']) : null;
+        $data = $_POST['data'];
+        $hora = $_POST['hora'];
+        $hora_final = !empty($_POST['hora_final']) ? $_POST['hora_final'] : null;
+        $admin_id = $_SESSION['user_id'];
+        
+        // Validação de dados
+        if (empty($nome) || empty($secretaria) || empty($veiculo_id) || empty($destino) || empty($data) || empty($hora)) {
+            throw new Exception("Todos os campos obrigatórios devem ser preenchidos.");
+        }
+        
+        // Buscar placa e nome do veículo - Usando a coluna tipo como nome_veiculo
+        $query_veiculo = "SELECT placa, tipo as nome_veiculo FROM veiculos WHERE veiculo = :veiculo_id";
+        $stmt_veiculo = $conn->prepare($query_veiculo);
+        $stmt_veiculo->bindParam(':veiculo_id', $veiculo_id);
+        $stmt_veiculo->execute();
+        $veiculo = $stmt_veiculo->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$veiculo) {
+            throw new Exception("Veículo não encontrado.");
+        }
+        
         $placa = $veiculo['placa'];
         $nome_veiculo = $veiculo['nome_veiculo'];
         
-        try {
-            // Iniciar transação
-            $conn->beginTransaction();
+        // Iniciar transação
+        $conn->beginTransaction();
+        
+        // Preparar dados do registro para inserção
+        $dados_registro = [
+            'nome' => $nome,
+            'secretaria' => $secretaria,
+            'veiculo_id' => $veiculo_id,
+            'placa' => $placa,
+            'nome_veiculo' => $nome_veiculo,
+            'km_inicial' => $km_inicial,
+            'km_final' => $km_final,
+            'destino' => $destino,
+            'ponto_parada' => $ponto_parada,
+            'data' => $data,
+            'hora' => $hora,
+            'hora_final' => $hora_final
+        ];
+        
+        // Inserir novo registro
+        $query = "INSERT INTO registros (nome, secretaria, veiculo_id, placa, nome_veiculo, km_inicial, km_final, 
+                 destino, ponto_parada, data, hora, hora_final) 
+                 VALUES (:nome, :secretaria, :veiculo_id, :placa, :nome_veiculo, :km_inicial, :km_final, 
+                 :destino, :ponto_parada, :data, :hora, :hora_final)";
+        $stmt = $conn->prepare($query);
+        
+        foreach ($dados_registro as $campo => $valor) {
+            $stmt->bindValue(':' . $campo, $valor);
+        }
+        
+        if ($stmt->execute()) {
+            $registro_id = $conn->lastInsertId();
             
-            // Preparar dados do registro para inserção
-            $dados_registro = [
-                'nome' => $nome,
-                'secretaria' => $secretaria,
-                'veiculo_id' => $veiculo_id,
-                'placa' => $placa,
-                'nome_veiculo' => $nome_veiculo,
-                'km_inicial' => $km_inicial,
-                'km_final' => $km_final,
-                'destino' => $destino,
-                'ponto_parada' => $ponto_parada,
-                'data' => $data,
-                'hora' => $hora,
-                'hora_final' => $hora_final
-            ];
-            
-            // Inserir novo registro
-            $query = "INSERT INTO registros (nome, secretaria, veiculo_id, placa, nome_veiculo, km_inicial, km_final, 
-                     destino, ponto_parada, data, hora, hora_final) 
-                     VALUES (:nome, :secretaria, :veiculo_id, :placa, :nome_veiculo, :km_inicial, :km_final, 
-                     :destino, :ponto_parada, :data, :hora, :hora_final)";
+            // Buscar o registro completo inserido
+            $query = "SELECT * FROM registros WHERE id = :id";
             $stmt = $conn->prepare($query);
+            $stmt->bindParam(':id', $registro_id);
+            $stmt->execute();
+            $registro_inserido = $stmt->fetch(PDO::FETCH_ASSOC);
             
-            foreach ($dados_registro as $campo => $valor) {
-                $stmt->bindValue(':' . $campo, $valor);
-            }
+            // Registrar a adição completa no histórico
+            registrarAdicaoCompleta($conn, $registro_id, $admin_id, $registro_inserido);
             
-            if ($stmt->execute()) {
-                $registro_id = $conn->lastInsertId();
-                
-                // Buscar o registro completo inserido
-                $query = "SELECT * FROM registros WHERE id = :id";
-                $stmt = $conn->prepare($query);
-                $stmt->bindParam(':id', $registro_id);
-                $stmt->execute();
-                $registro_inserido = $stmt->fetch(PDO::FETCH_ASSOC);
-                
-                // Registrar a adição completa no histórico
-                registrarAdicaoCompleta($conn, $registro_id, $admin_id, $registro_inserido);
-                
-                $conn->commit();
-                $_SESSION['mensagem'] = "Novo registro adicionado com sucesso!";
-                $_SESSION['tipo_mensagem'] = "success";
-            } else {
-                $conn->rollBack();
-                $_SESSION['mensagem'] = "Erro ao adicionar novo registro.";
-                $_SESSION['tipo_mensagem'] = "error";
-            }
-        } catch (PDOException $e) {
+            $conn->commit();
+            $_SESSION['mensagem'] = "Novo registro adicionado com sucesso!";
+            $_SESSION['tipo_mensagem'] = "success";
+        } else {
             $conn->rollBack();
-            $_SESSION['mensagem'] = "Erro ao adicionar registro: " . $e->getMessage();
+            $_SESSION['mensagem'] = "Erro ao adicionar novo registro.";
             $_SESSION['tipo_mensagem'] = "error";
         }
-    } else {
-        $_SESSION['mensagem'] = "Veículo não encontrado.";
+    } catch (PDOException $e) {
+        if (isset($conn) && $conn->inTransaction()) {
+            $conn->rollBack();
+        }
+        $_SESSION['mensagem'] = "Erro ao adicionar registro: " . $e->getMessage();
+        $_SESSION['tipo_mensagem'] = "error";
+    } catch (Exception $e) {
+        if (isset($conn) && $conn->inTransaction()) {
+            $conn->rollBack();
+        }
+        $_SESSION['mensagem'] = "Erro: " . $e->getMessage();
         $_SESSION['tipo_mensagem'] = "error";
     }
     
@@ -413,6 +456,7 @@ $hora_atual = date('H:i');
         .table-container {
             overflow-x: auto;
             border-radius: 12px;
+            -webkit-overflow-scrolling: touch; /* Melhora rolagem em iOS */
         }
 
         table {
@@ -431,12 +475,21 @@ $hora_atual = date('H:i');
             font-size: 0.75rem;
             letter-spacing: 0.05em;
             padding: 12px 15px;
+            white-space: nowrap; /* Evita quebra de linha */
         }
 
         th, td {
             padding: 12px 15px;
             text-align: left;
             border-bottom: 1px solid #E5E7EB;
+        }
+
+        /* Reduz espaçamento em telas pequenas */
+        @media (max-width: 640px) {
+            th, td {
+                padding: 8px 10px;
+                font-size: 0.875rem; /* Texto menor em mobile */
+            }
         }
 
         tr:hover td {
@@ -446,6 +499,8 @@ $hora_atual = date('H:i');
         .edit-icon, .delete-icon {
             cursor: pointer;
             transition: all 0.2s;
+            font-size: 1.25rem; /* Ícones maiores para facilitar toque */
+            padding: 8px; /* Área de toque maior */
         }
 
         .edit-icon {
@@ -477,9 +532,24 @@ $hora_atual = date('H:i');
             margin: 10% auto;
             padding: 20px;
             border-radius: 8px;
-            width: 80%;
+            width: 90%; /* Ajuste para mobile */
             max-width: 500px;
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+
+        /* Modal de adição precisa de mais espaço */
+        #modalAdicao .modal-content {
+            width: 95%;
+            max-width: 700px;
+            margin: 5% auto;
+        }
+
+        /* Em telas pequenas, centraliza melhor */
+        @media (max-width: 640px) {
+            .modal-content {
+                margin: 5% auto;
+                padding: 16px;
+            }
         }
 
         .close {
@@ -488,6 +558,7 @@ $hora_atual = date('H:i');
             font-size: 28px;
             font-weight: bold;
             cursor: pointer;
+            padding: 0 8px; /* Área de toque maior */
         }
 
         .close:hover {
@@ -500,6 +571,10 @@ $hora_atual = date('H:i');
             padding: 8px 16px;
             border-radius: 6px;
             transition: all 0.2s;
+            height: 40px; /* Altura padronizada para botões */
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
         }
 
         .btn-primary:hover {
@@ -512,6 +587,10 @@ $hora_atual = date('H:i');
             padding: 8px 16px;
             border-radius: 6px;
             transition: all 0.2s;
+            height: 40px; /* Altura padronizada para botões */
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
         }
 
         .btn-danger:hover {
@@ -524,10 +603,29 @@ $hora_atual = date('H:i');
             padding: 8px 16px;
             border-radius: 6px;
             transition: all 0.2s;
+            height: 40px; /* Altura padronizada para botões */
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
         }
 
         .btn-secondary:hover {
             background-color: #4B5563;
+        }
+
+        /* Botões adaptados para mobile */
+        @media (max-width: 640px) {
+            .btn-primary, .btn-danger, .btn-secondary {
+                width: 100%;
+                margin-bottom: 8px;
+                padding: 10px;
+                font-size: 1rem;
+            }
+            
+            .flex.justify-end.space-x-2 {
+                flex-direction: column;
+                align-items: stretch;
+            }
         }
 
         .success-message {
@@ -564,7 +662,7 @@ $hora_atual = date('H:i');
         }
 
         .suggestion-item {
-            padding: 8px 12px;
+            padding: 12px; /* Maior área de toque */
             cursor: pointer;
             border-bottom: 1px solid #f3f3f3;
         }
@@ -576,36 +674,113 @@ $hora_atual = date('H:i');
         .suggestion-item:hover {
             background-color: #f0f7ff;
         }
+        
+        /* Estilos específicos para mobile */
+        @media (max-width: 768px) {
+            /* Tabela responsiva */
+            .mobile-table-cell {
+                display: flex;
+                flex-direction: column;
+            }
+            
+            .mobile-label {
+                font-weight: 600;
+                font-size: 0.75rem;
+                color: #6B7280;
+                margin-bottom: 4px;
+                display: none; /* Escondido por padrão, visível apenas em visualização mobile */
+            }
+            
+            /* Estilo para campos de formulário para facilitar entrada no mobile */
+            input, select, textarea {
+                font-size: 16px !important; /* Previne zoom automático em iPhones */
+                padding: 12px !important;
+                margin-bottom: 12px;
+            }
+            
+            /* Visualização de tabela específica para mobile */
+            @media (max-width: 640px) {
+                .desktop-table {
+                    display: none;
+                }
+                
+                .mobile-table {
+                    display: block;
+                }
+                
+                .mobile-card {
+                    border: 1px solid #E5E7EB;
+                    border-radius: 8px;
+                    margin-bottom: 12px;
+                    padding: 12px;
+                }
+                
+                .mobile-table-header {
+                    background-color: #F9FAFB;
+                    padding: 8px 12px;
+                    border-radius: 6px 6px 0 0;
+                    font-weight: 600;
+                }
+                
+                .mobile-table-body {
+                    padding: 12px;
+                }
+                
+                .mobile-table-row {
+                    margin-bottom: 16px;
+                    padding-bottom: 16px;
+                    border-bottom: 1px solid #E5E7EB;
+                }
+                
+                .mobile-table-row:last-child {
+                    border-bottom: none;
+                    margin-bottom: 0;
+                    padding-bottom: 0;
+                }
+                
+                .mobile-label {
+                    display: block;
+                }
+                
+                .mobile-actions {
+                    display: flex;
+                    justify-content: flex-end;
+                    margin-top: 8px;
+                }
+            }
+        }
     </style>
 </head>
 <body class="min-h-screen">
-        <!-- App Bar -->
-        <div class="bg-indigo-600 text-white shadow-md">
-            <div class="container mx-auto px-4 py-4 flex justify-between items-center">
-                <div class="flex items-center space-x-3">
-                    <h1 class="text-xl font-bold">Editar Quilometragem</h1>
-                </div>
-                <div class="flex items-center space-x-4">
-                    <button onclick="abrirModalAdicao()" class="flex items-center space-x-2 bg-white/20 hover:bg-white/30 px-4 py-2 rounded-lg transition mr-2">
-                        <i class="fas fa-plus"></i>
-                        <span>Novo Registro</span>
+    <!-- App Bar - Versão Ajustada -->
+    <div class="bg-indigo-600 text-white shadow-md">
+        <div class="container mx-auto px-4 py-3">
+            <div class="flex flex-col md:flex-row justify-between items-center">
+                <h1 class="text-xl font-bold mb-3 md:mb-0">Editar Quilometragem</h1>
+                
+                <div class="flex flex-wrap w-full md:w-auto justify-center gap-2">
+                    <button onclick="abrirModalAdicao()" class="bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-md transition text-sm font-medium min-w-[90px] flex items-center justify-center">
+                        <i class="fas fa-plus mr-1.5"></i> Novo
+                    </button>
+                    <button onclick="window.location.href='historico_corridas.php'" 
+                        class="bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-md transition text-sm font-medium min-w-[90px] flex items-center justify-center">
+                        <i class="fas fa-history mr-1.5"></i> Histórico
                     </button>
                     <a href="<?= $_SESSION['role'] === 'geraladm' ? 'geral_adm.php' : 'admin.php' ?>"
-                    class="flex items-center space-x-2 bg-white/20 hover:bg-white/30 px-4 py-2 rounded-lg transition"
-                    aria-label="Voltar">
-                        <i class="fas fa-arrow-left"></i>
-                        <span>Voltar</span>
+                        class="bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-md transition text-sm font-medium min-w-[90px] flex items-center justify-center">
+                        <i class="fas fa-arrow-left mr-1.5"></i> Voltar
                     </a>
                 </div>
             </div>
         </div>
+    </div>
 
     <!-- Main Content -->
     <div class="container mx-auto px-4 py-6">
         <!-- Filtros -->
-        <div class="card p-6 mb-6">
+        <div class="card p-4 md:p-6 mb-6">
             <h2 class="text-xl font-semibold text-gray-800 mb-4">Filtros</h2>
-            <form method="get" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <form method="get" class="grid grid-cols-1 gap-4">
                 <div class="suggestions-container">
                     <label for="codigo_veiculo" class="block text-sm font-medium text-gray-700 mb-2">Código do Veículo</label>
                     <input type="text" id="codigo_veiculo" name="codigo_veiculo" class="w-full px-3 py-2 border rounded-md"
@@ -613,18 +788,20 @@ $hora_atual = date('H:i');
                            oninput="buscarVeiculos(this.value)">
                     <div id="suggestions" class="suggestions-list"></div>
                 </div>
-                <div>
-                    <label for="data_inicial" class="block text-sm font-medium text-gray-700 mb-2">Data Inicial</label>
-                    <input type="date" id="data_inicial" name="data_inicial" class="w-full px-3 py-2 border rounded-md"
-                           value="<?= htmlspecialchars($data_inicial) ?>">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label for="data_inicial" class="block text-sm font-medium text-gray-700 mb-2">Data Inicial</label>
+                        <input type="date" id="data_inicial" name="data_inicial" class="w-full px-3 py-2 border rounded-md"
+                               value="<?= htmlspecialchars($data_inicial) ?>">
+                    </div>
+                    <div>
+                        <label for="data_final" class="block text-sm font-medium text-gray-700 mb-2">Data Final</label>
+                        <input type="date" id="data_final" name="data_final" class="w-full px-3 py-2 border rounded-md"
+                               value="<?= htmlspecialchars($data_final) ?>">
+                    </div>
                 </div>
                 <div>
-                    <label for="data_final" class="block text-sm font-medium text-gray-700 mb-2">Data Final</label>
-                    <input type="date" id="data_final" name="data_final" class="w-full px-3 py-2 border rounded-md"
-                           value="<?= htmlspecialchars($data_final) ?>">
-                </div>
-                <div class="md:col-span-3">
-                    <button type="submit" class="btn-primary">
+                    <button type="submit" class="btn-primary w-full md:w-auto">
                         <i class="fas fa-search mr-2"></i> Pesquisar
                     </button>
                 </div>
@@ -640,11 +817,12 @@ $hora_atual = date('H:i');
         <?php endif; ?>
 
         <!-- Tabela de Registros -->
-        <div class="card p-6">
+        <div class="card p-4 md:p-6">
             <h2 class="text-xl font-semibold text-gray-800 mb-4">Registros</h2>
 
             <?php if (count($registros) > 0): ?>
-                <div class="table-container">
+                <!-- Versão Desktop da Tabela -->
+                <div class="table-container desktop-table hidden md:block">
                     <table>
                         <thead>
                             <tr>
@@ -694,6 +872,69 @@ $hora_atual = date('H:i');
                         </tbody>
                     </table>
                 </div>
+                
+                <!-- Versão Mobile da Tabela - Cards -->
+                <div class="mobile-table block md:hidden">
+                    <?php foreach ($registros as $registro):
+                        $km_percorrido = $registro['km_final'] - $registro['km_inicial'];
+                    ?>
+                        <div class="mobile-card bg-white mb-4">
+                            <div class="flex justify-between items-center mb-2">
+                                <div class="font-semibold"><?= htmlspecialchars($registro['veiculo']) ?></div>
+                                <div class="text-sm text-gray-500"><?= htmlspecialchars($registro['data']) ?></div>
+                            </div>
+                            
+                            <div class="grid grid-cols-2 gap-2 mb-3">
+                                <div>
+                                    <div class="mobile-label">Placa</div>
+                                    <div><?= htmlspecialchars($registro['placa']) ?></div>
+                                </div>
+                                <div>
+                                    <div class="mobile-label">Motorista</div>
+                                    <div><?= htmlspecialchars($registro['nome']) ?></div>
+                                </div>
+                                <div>
+                                    <div class="mobile-label">KM Inicial</div>
+                                    <div><?= htmlspecialchars($registro['km_inicial']) ?></div>
+                                </div>
+                                <div>
+                                    <div class="mobile-label">KM Final</div>
+                                    <div><?= htmlspecialchars($registro['km_final']) ?></div>
+                                </div>
+                                <div>
+                                    <div class="mobile-label">Total KM</div>
+                                    <div><?= $km_percorrido ?></div>
+                                </div>
+                                <div>
+                                    <div class="mobile-label">Secretaria</div>
+                                    <div class="truncate"><?= htmlspecialchars($registro['secretaria']) ?></div>
+                                </div>
+                            </div>
+                            
+                            <div class="flex justify-end space-x-4">
+                                <button class="p-2 text-indigo-600" 
+                                       onclick="abrirModalEdicao(
+                                           '<?= $registro['id'] ?>',
+                                           '<?= $registro['km_inicial'] ?>',
+                                           '<?= $registro['km_final'] ?>',
+                                           '<?= $registro['veiculo'] ?>',
+                                           '<?= $registro['data'] ?>'
+                                       )">
+                                    <i class="fas fa-pencil-alt"></i>
+                                </button>
+                                <button class="p-2 text-red-600"
+                                       onclick="abrirModalExclusao(
+                                           '<?= $registro['id'] ?>',
+                                           '<?= $registro['veiculo'] ?>',
+                                           '<?= $registro['data'] ?>',
+                                           '<?= $registro['nome'] ?>'
+                                       )">
+                                    <i class="fas fa-trash-alt"></i>
+                                </button>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
             <?php else: ?>
                 <div class="text-center py-8">
                     <i class="fas fa-car text-4xl text-gray-300 mb-4"></i>
@@ -733,11 +974,11 @@ $hora_atual = date('H:i');
                     </div>
                 </div>
 
-                <div class="flex justify-end space-x-2">
-                    <button type="button" onclick="fecharModalEdicao()" class="px-4 py-2 border rounded-md">
+                <div class="flex flex-col md:flex-row md:justify-end md:space-x-2">
+                    <button type="button" onclick="fecharModalEdicao()" class="px-4 py-2 border rounded-md mb-2 md:mb-0 w-full md:w-auto">
                         Cancelar
                     </button>
-                    <button type="submit" class="btn-primary">
+                    <button type="submit" class="btn-primary w-full md:w-auto">
                         <i class="fas fa-save mr-2"></i> Salvar
                     </button>
                 </div>
@@ -774,11 +1015,11 @@ $hora_atual = date('H:i');
                     </div>
                 </div>
 
-                <div class="flex justify-end space-x-2">
-                    <button type="button" onclick="fecharModalExclusao()" class="px-4 py-2 border rounded-md">
+                <div class="flex flex-col md:flex-row md:justify-end md:space-x-2">
+                    <button type="button" onclick="fecharModalExclusao()" class="px-4 py-2 border rounded-md mb-2 md:mb-0 w-full md:w-auto">
                         Cancelar
                     </button>
-                    <button type="submit" class="btn-danger">
+                    <button type="submit" class="btn-danger w-full md:w-auto">
                         <i class="fas fa-trash-alt mr-2"></i> Excluir
                     </button>
                 </div>
@@ -791,10 +1032,10 @@ $hora_atual = date('H:i');
         <div class="modal-content" style="max-width: 700px;">
             <span class="close" onclick="fecharModalAdicao()">&times;</span>
             <h2 class="text-xl font-semibold mb-4">Adicionar Novo Registro</h2>
-            <form id="formAdicao" method="post">
+            <form id="formAdicao" method="post" action="mudar_km_carro.php">
                 <input type="hidden" name="action" value="adicionar">
 
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <div class="grid grid-cols-1 gap-4 mb-4">
                     <div class="suggestions-container">
                         <label for="nome" class="block text-sm font-medium text-gray-700 mb-2">Nome do Motorista</label>
                         <input type="text" id="nome" name="nome" class="w-full px-3 py-2 border rounded-md" 
@@ -813,7 +1054,7 @@ $hora_atual = date('H:i');
                     </div>
                 </div>
 
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <div class="grid grid-cols-1 gap-4 mb-4">
                     <div class="suggestions-container">
                         <label for="veiculo_id" class="block text-sm font-medium text-gray-700 mb-2">Código do Veículo</label>
                         <input type="text" id="veiculo_id" name="veiculo_id" class="w-full px-3 py-2 border rounded-md" 
@@ -826,7 +1067,7 @@ $hora_atual = date('H:i');
                     </div>
                 </div>
 
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <div class="grid grid-cols-1 gap-4 mb-4">
                     <div>
                         <label for="ponto_parada" class="block text-sm font-medium text-gray-700 mb-2">Ponto de Parada (opcional)</label>
                         <input type="text" id="ponto_parada" name="ponto_parada" class="w-full px-3 py-2 border rounded-md">
@@ -838,7 +1079,7 @@ $hora_atual = date('H:i');
                     </div>
                 </div>
 
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <div>
                         <label for="hora" class="block text-sm font-medium text-gray-700 mb-2">Hora Inicial</label>
                         <input type="time" id="hora" name="hora" class="w-full px-3 py-2 border rounded-md" 
@@ -848,22 +1089,24 @@ $hora_atual = date('H:i');
                         <label for="hora_final" class="block text-sm font-medium text-gray-700 mb-2">Hora Final (opcional)</label>
                         <input type="time" id="hora_final" name="hora_final" class="w-full px-3 py-2 border rounded-md">
                     </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <div>
                         <label for="km_inicial_novo" class="block text-sm font-medium text-gray-700 mb-2">KM Inicial</label>
                         <input type="number" id="km_inicial_novo" name="km_inicial_novo" class="w-full px-3 py-2 border rounded-md" required>
                     </div>
+                    <div>
+                        <label for="km_final_novo" class="block text-sm font-medium text-gray-700 mb-2">KM Final (opcional)</label>
+                        <input type="number" id="km_final_novo" name="km_final_novo" class="w-full px-3 py-2 border rounded-md">
+                    </div>
                 </div>
 
-                <div class="mb-4">
-                    <label for="km_final_novo" class="block text-sm font-medium text-gray-700 mb-2">KM Final (opcional)</label>
-                    <input type="number" id="km_final_novo" name="km_final_novo" class="w-full px-3 py-2 border rounded-md">
-                </div>
-
-                <div class="flex justify-end space-x-2">
-                    <button type="button" onclick="fecharModalAdicao()" class="px-4 py-2 border rounded-md">
+                <div class="flex flex-col md:flex-row md:justify-end md:space-x-2">
+                    <button type="button" onclick="fecharModalAdicao()" class="px-4 py-2 border rounded-md mb-2 md:mb-0 w-full md:w-auto">
                         Cancelar
                     </button>
-                    <button type="submit" class="btn-primary">
+                    <button type="submit" class="btn-primary w-full md:w-auto">
                         <i class="fas fa-plus mr-2"></i> Adicionar
                     </button>
                 </div>
@@ -1001,28 +1244,44 @@ $hora_atual = date('H:i');
             });
         }
 
-        // Função para buscar usuários - VERSÃO SIMPLIFICADA
+        // Função para buscar usuários
         function buscarUsuarios(termo) {
-            console.log("Buscando usuários com termo: " + termo);
-            
             if (termo.length >= 2) {
                 $.ajax({
-                    url: 'buscar_usuarios.php',
+                    url: 'buscar_usuario.php',
                     type: 'GET',
                     data: { termo: termo },
                     dataType: 'json',
                     success: function(data) {
-                        console.log("Dados recebidos:", data);
-                        
                         const suggestions = $('#suggestions_usuarios');
                         suggestions.empty();
 
-                        if (data && data.length > 0) {
+                        if (data.length > 0) {
                             data.forEach(function(usuario) {
+                                // Formatar informações adicionais para exibição
+                                let infoAdicional = [];
+                                if (usuario.secretaria) infoAdicional.push(usuario.secretaria);
+                                if (usuario.cpf) {
+                                    // Formatar CPF se possível
+                                    let cpfFormatado = usuario.cpf;
+                                    if (usuario.cpf.length === 11) {
+                                        cpfFormatado = usuario.cpf.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4");
+                                    }
+                                    infoAdicional.push(cpfFormatado);
+                                }
+                                if (usuario.number) infoAdicional.push(usuario.number);
+                                
+                                const infoText = infoAdicional.length > 0 ? ` - ${infoAdicional.join(' | ')}` : '';
+                                
+                                // Escapar caracteres especiais para evitar problemas com aspas
+                                const nomeEscapado = usuario.name.replace(/'/g, "\\'").replace(/"/g, '\\"');
+                                const secretariaEscapada = usuario.secretaria ? usuario.secretaria.replace(/'/g, "\\'").replace(/"/g, '\\"') : '';
+                                
                                 suggestions.append(
-                                    `<div class="suggestion-item" onclick="selecionarUsuario('${usuario.name}')">
-                                        ${usuario.name}
-                                     </div>`
+                                    `<div class="suggestion-item" onclick="selecionarUsuario('${nomeEscapado}', '${secretariaEscapada}', ${usuario.id})">
+                                        <div class="font-medium">${usuario.name}</div>
+                                        <div class="text-xs text-gray-600">${infoText}</div>
+                                    </div>`
                                 );
                             });
                             suggestions.show();
@@ -1030,10 +1289,8 @@ $hora_atual = date('H:i');
                             suggestions.hide();
                         }
                     },
-                    error: function(xhr, status, error) {
-                        console.error("Erro na busca de usuários:", error);
-                        console.error("Status:", status);
-                        console.error("Resposta:", xhr.responseText);
+                    error: function() {
+                        console.log("Erro ao buscar usuários");
                         $('#suggestions_usuarios').hide();
                     }
                 });
@@ -1042,11 +1299,41 @@ $hora_atual = date('H:i');
             }
         }
 
-        // Função simplificada para selecionar um usuário
-        function selecionarUsuario(nome) {
-            console.log("Selecionando usuário:", nome);
+        // Função para selecionar um usuário da lista de sugestões
+        function selecionarUsuario(nome, secretaria, userId) {
+            console.log("Selecionando usuário:", nome, secretaria, userId);
+            
+            // Preencher o campo de nome e armazenar o ID do usuário
             $('#nome').val(nome);
+            $('#usuario_id').val(userId);
             $('#suggestions_usuarios').hide();
+            
+            // Preencher a secretaria automaticamente se disponível e o campo estiver vazio
+            if (secretaria && $('#secretaria').val() === '') {
+                // Mapear a secretaria para o formato correto se necessário
+                const secretariasDisponiveis = <?= json_encode($secretarias_disponiveis) ?>;
+                const secretariasMapeadas = <?= json_encode(array_flip($secretarias_map)) ?>; // Invertemos para facilitar
+                
+                // Verificar se a secretaria está diretamente nas secretarias disponí                // Verificar se a secretaria está diretamente nas secretarias disponíveis
+                if (secretariasDisponiveis.includes(secretaria)) {
+                    $('#secretaria').val(secretaria);
+                } else {
+                    // Verificar se é necessário mapear
+                    if (secretariasMapeadas[secretaria]) {
+                        const secretariaMapeada = secretariasMapeadas[secretaria];
+                        if (secretariasDisponiveis.includes(secretariaMapeada)) {
+                            $('#secretaria').val(secretariaMapeada);
+                        }
+                    }
+                    // Se não encontrou na inversão, tenta o mapeamento original
+                    else {
+                        const secretariasMapOriginais = <?= json_encode($secretarias_map) ?>;
+                        if (secretariasMapOriginais[secretaria] && secretariasDisponiveis.includes(secretariasMapOriginais[secretaria])) {
+                            $('#secretaria').val(secretariasMapOriginais[secretaria]);
+                        }
+                    }
+                }
+            }
         }
 
         // Esconder sugestões quando clicar em outro lugar
@@ -1054,6 +1341,39 @@ $hora_atual = date('H:i');
             if (!$(event.target).closest('.suggestions-container').length) {
                 $('.suggestions-list').hide();
             }
+        });
+
+        // Verificar se há mensagens de erro no console
+        $(document).ready(function() {
+            console.log("Página carregada em: <?= date('Y-m-d H:i:s') ?>");
+            console.log("Usuário: <?= $usuario_logado ?>");
+            
+            // Verificar e mostrar possíveis erros nos modais
+            $("#formAdicao").on("submit", function(e) {
+                // Verificação adicional dos campos obrigatórios
+                let camposObrigatorios = ['nome', 'secretaria', 'veiculo_id', 'destino', 'data', 'hora', 'km_inicial_novo'];
+                let temErro = false;
+                
+                camposObrigatorios.forEach(function(campo) {
+                    let elemento = document.getElementById(campo);
+                    if (elemento && !elemento.value.trim()) {
+                        console.error(`Campo obrigatório não preenchido: ${campo}`);
+                        elemento.classList.add('border-red-500');
+                        temErro = true;
+                    } else if (elemento) {
+                        elemento.classList.remove('border-red-500');
+                    }
+                });
+                
+                if (temErro) {
+                    e.preventDefault();
+                    alert("Por favor, preencha todos os campos obrigatórios.");
+                    return false;
+                }
+                
+                console.log("Formulário de adição válido, enviando...");
+                return true;
+            });
         });
     </script>
 </body>
