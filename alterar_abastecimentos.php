@@ -565,6 +565,16 @@ $combustiveis_disponiveis = buscarCombustiveis();
 // Obter a data atual para o formulário de adição
 $data_atual = date('Y-m-d');
 $hora_atual = date('H:i');
+
+// Buscar todos os preços de combustíveis da tabela postos_precos
+try {
+    $stmt_precos = $conn->prepare("SELECT * FROM postos_precos ORDER BY posto_nome, tipo_combustivel");
+    $stmt_precos->execute();
+    $precos_combustiveis = $stmt_precos->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {
+    error_log("Erro ao buscar preços de combustíveis: " . $e->getMessage());
+    $precos_combustiveis = [];
+}
 ?>
 
 <!DOCTYPE html>
@@ -1240,14 +1250,17 @@ $hora_atual = date('H:i');
                         <input type="number" id="modal_km_abastecido" name="km_abastecido" class="w-full px-3 py-2 border rounded-md">
                     </div>
                     <div>
+                        <label for="modal_litros" class="block text-sm font                    <div>
                         <label for="modal_litros" class="block text-sm font-medium text-gray-700 mb-2">Litros</label>
-                        <input type="number" step="0.01" id="modal_litros" name="litros" class="w-full px-3 py-2 border rounded-md" required>
+                        <input type="number" step="0.01" id="modal_litros" name="litros" class="w-full px-3 py-2 border rounded-md" required 
+                            onchange="calcularValorAbastecimentoModal()">
                     </div>
                 </div>
                 
                 <div class="mb-4">
                     <label for="modal_combustivel" class="block text-sm font-medium text-gray-700 mb-2">Combustível</label>
-                    <select id="modal_combustivel" name="combustivel" class="w-full px-3 py-2 border rounded-md"                    <select id="modal_combustivel" name="combustivel" class="w-full px-3 py-2 border rounded-md" required>
+                    <select id="modal_combustivel" name="combustivel" class="w-full px-3 py-2 border rounded-md" 
+                        onchange="calcularValorAbastecimentoModal()">
                         <option value="">Selecione o combustível</option>
                         <option value="Gasolina">Gasolina</option>
                         <option value="Etanol">Etanol</option>
@@ -1258,7 +1271,8 @@ $hora_atual = date('H:i');
                 
                 <div class="mb-4">
                     <label for="modal_posto_gasolina" class="block text-sm font-medium text-gray-700 mb-2">Posto de Combustível</label>
-                    <select id="modal_posto_gasolina" name="posto_gasolina" class="w-full px-3 py-2 border rounded-md">
+                    <select id="modal_posto_gasolina" name="posto_gasolina" class="w-full px-3 py-2 border rounded-md" 
+                        onchange="calcularValorAbastecimentoModal()">
                         <option value="">Selecione ou digite outro posto</option>
                         <option value="ABRANTES & ABRANTES LTDA">POSTO NORDESTE - ABRANTES & ABRANTES LTDA</option>
                         <option value="ALBERTI COMERCIO DE COMBUSTIVEIS">POSTO CIDADE - ALBERTI COMERCIO DE COMBUSTIVEIS</option>
@@ -1409,14 +1423,14 @@ $hora_atual = date('H:i');
                     <div>
                         <label for="litros" class="block text-sm font-medium text-gray-700 mb-2">Litros <span class="text-red-500">*</span></label>
                         <input type="number" step="0.01" id="litros" name="litros" class="w-full px-3 py-2 border rounded-md" 
-                               placeholder="Ex: 45.50" required>
+                               placeholder="Ex: 45.50" required onchange="calcularValorAbastecimento()">
                     </div>
                 </div>
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <div>
-                        <label for="combustivel" class="block text-sm font-medium text-gray-700 mb-2">Combustível <span class="text-red-500">*</span></label>
-                        <select id="combustivel" name="combustivel" class="w-full px-3 py-2 border rounded-md" required>
+                        <label for="tipo_combustivel" class="block text-sm font-medium text-gray-700 mb-2">Combustível <span class="text-red-500">*</span></label>
+                        <select id="tipo_combustivel" name="combustivel" class="w-full px-3 py-2 border rounded-md" required onchange="calcularValorAbastecimento()">
                             <option value="">Selecione o combustível</option>
                             <option value="Gasolina">Gasolina</option>
                             <option value="Etanol">Etanol</option>
@@ -1425,8 +1439,8 @@ $hora_atual = date('H:i');
                         </select>
                     </div>
                     <div>
-                        <label for="posto_gasolina" class="block text-sm font-medium text-gray-700 mb-2">Posto de Combustível</label>
-                        <select id="posto_gasolina" name="posto_gasolina" class="w-full px-3 py-2 border rounded-md">
+                        <label for="posto" class="block text-sm font-medium text-gray-700 mb-2">Posto de Combustível</label>
+                        <select id="posto" name="posto_gasolina" class="w-full px-3 py-2 border rounded-md" onchange="calcularValorAbastecimento()">
                             <option value="">Selecione ou digite outro posto</option>
                             <option value="ABRANTES & ABRANTES LTDA">POSTO NORDESTE - ABRANTES & ABRANTES LTDA</option>
                             <option value="ALBERTI COMERCIO DE COMBUSTIVEIS">POSTO CIDADE - ALBERTI COMERCIO DE COMBUSTIVEIS</option>
@@ -1447,9 +1461,9 @@ $hora_atual = date('H:i');
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <div>
-                        <label for="valor" class="block text-sm font-medium text-gray-700 mb-2">Valor (R$) <span class="text-red-500">*</span></label>
-                        <input type="number" step="0.01" id="valor" name="valor" class="w-full px-3 py-2 border rounded-md" 
-                               placeholder="Ex: 250.00" required>
+                        <label for="valor_abastecimento" class="block text-sm font-medium text-gray-700 mb-2">Valor (R$) <span class="text-red-500">*</span></label>
+                        <input type="text" id="valor_abastecimento" name="valor" class="w-full px-3 py-2 border rounded-md" 
+                               placeholder="Ex: 250,00" required>
                     </div>
                     <div>
                         <label for="nota_fiscal" class="block text-sm font-medium text-gray-700 mb-2">Nota Fiscal (opcional)</label>
@@ -1475,6 +1489,9 @@ $hora_atual = date('H:i');
     </div>
 
     <script>
+        // Armazenar dados de preços de combustíveis para cálculos
+        const precosCombustiveis = <?= json_encode($precos_combustiveis) ?>;
+
         // Funções para o modal de edição
         function abrirModalEdicao(id, nome, data, hora, km_abastecido, litros, combustivel, posto_gasolina, valor, nota_fiscal) {
             console.log("Abrindo modal de edição para ID:", id);
@@ -1571,7 +1588,7 @@ $hora_atual = date('H:i');
         // Funções para o modal de adição
         function abrirModalAdicao() {
             // Garantir que o combustível tenha um valor padrão selecionado
-            document.getElementById('combustivel').value = 'Gasolina';
+            document.getElementById('tipo_combustivel').value = 'Gasolina';
             document.getElementById('modalAdicao').style.display = 'block';
         }
 
@@ -1807,13 +1824,15 @@ $hora_atual = date('H:i');
         }
 
         // Lidar com a seleção de "outro" posto no modal de adição
-        $('#posto_gasolina').change(function() {
+        $('#posto').change(function() {
             if ($(this).val() === 'outro') {
                 $('#outro_posto_container').show();
                 $('#outro_posto').attr('required', true);
             } else {
                 $('#outro_posto_container').hide();
                 $('#outro_posto').attr('required', false);
+                // Recalcular o valor quando o posto mudar
+                calcularValorAbastecimento();
             }
         });
 
@@ -1825,8 +1844,44 @@ $hora_atual = date('H:i');
             } else {
                 $('#outro_posto_modal_container').hide();
                 $('#outro_posto_modal').attr('required', false);
+                // Recalcular o valor quando o posto mudar
+                calcularValorAbastecimentoModal();
             }
         });
+
+        //*****CALCULO DO ABASTECIMENTO - MODAL ADICIONAR */
+        function calcularValorAbastecimento() {
+            const litros = parseFloat(document.getElementById('litros').value.replace(',', '.')) || 0;
+            const posto = document.getElementById('posto').value;
+            const tipoCombustivel = document.getElementById('tipo_combustivel').value;
+
+            if (litros > 0 && posto && tipoCombustivel) {
+                const precoCombustivel = precosCombustiveis.find(preco => preco.posto_nome === posto && preco.tipo_combustivel === tipoCombustivel);
+                const preco = precoCombustivel ? parseFloat(precoCombustivel.preco) : 0;
+
+                if (preco > 0) {
+                    const valorAbastecimento = litros * preco;
+                    document.getElementById('valor_abastecimento').value = valorAbastecimento.toFixed(2).replace('.', ',');
+                }
+            }
+        }
+
+        //*****CALCULO DO ABASTECIMENTO - MODAL EDITAR */
+        function calcularValorAbastecimentoModal() {
+            const litros = parseFloat(document.getElementById('modal_litros').value.replace(',', '.')) || 0;
+            const posto = document.getElementById('modal_posto_gasolina').value;
+            const tipoCombustivel = document.getElementById('modal_combustivel').value;
+
+            if (litros > 0 && posto && tipoCombustivel) {
+                const precoCombustivel = precosCombustiveis.find(preco => preco.posto_nome === posto && preco.tipo_combustivel === tipoCombustivel);
+                const preco = precoCombustivel ? parseFloat(precoCombustivel.preco) : 0;
+
+                if (preco > 0) {
+                    const valorAbastecimento = litros * preco;
+                    document.getElementById('modal_valor').value = valorAbastecimento.toFixed(2);
+                }
+            }
+        }
 
         // Ajustar o formEdicao para lidar com campo "outro posto" e garantir seleção de combustível
         $("#formEdicao").on("submit", function(e) {
@@ -1888,20 +1943,20 @@ $hora_atual = date('H:i');
             console.log("Formulário de adição sendo enviado");
             
             // Verificar se um combustível foi selecionado
-            var combustivel = $('#combustivel').val();
+            var combustivel = $('#tipo_combustivel').val();
             if (!combustivel || combustivel === '') {
-                $('#combustivel').val('Gasolina'); // Define um valor padrão
+                $('#tipo_combustivel').val('Gasolina'); // Define um valor padrão
                 console.log("Combustível não selecionado, definindo como Gasolina");
             }
             
             // Verificar se o posto de gasolina é "outro" e ajustar o valor
-            if ($('#posto_gasolina').val() === 'outro' && $('#outro_posto').val().trim() !== '') {
+            if ($('#posto').val() === 'outro' && $('#outro_posto').val().trim() !== '') {
                 // Substituir o valor do posto_gasolina pelo valor digitado em outro_posto
-                $('#posto_gasolina').val($('#outro_posto').val().trim());
+                $('#posto').val($('#outro_posto').val().trim());
             }
             
             // Verificação adicional dos campos obrigatórios
-            let camposObrigatorios = ['nome', 'prefixo', 'placa', 'veiculo', 'data', 'hora', 'litros', 'valor'];
+            let camposObrigatorios = ['nome', 'prefixo', 'placa', 'veiculo', 'data', 'hora', 'litros', 'valor_abastecimento'];
             let temErro = false;
             let camposFaltantes = [];
             
@@ -1921,12 +1976,12 @@ $hora_atual = date('H:i');
             });
 
             // Verificar especificamente o campo de combustível
-            if (!$('#combustivel').val()) {
-                $('#combustivel').addClass('border-red-500');
+            if (!$('#tipo_combustivel').val()) {
+                $('#tipo_combustivel').addClass('border-red-500');
                 temErro = true;
                 camposFaltantes.push('Combustível');
             } else {
-                $('#combustivel').removeClass('border-red-500');
+                $('#tipo_combustivel').removeClass('border-red-500');
             }
             
             if (temErro) {
@@ -1953,7 +2008,7 @@ $hora_atual = date('H:i');
             
             // Definir valor padrão para os campos de combustível
             $('#modal_combustivel').val('Gasolina');
-            $('#combustivel').val('Gasolina');
+            $('#tipo_combustivel').val('Gasolina');
             
             // Tentativa inicial de busca para verificar se estão funcionando os arquivos
             $.ajax({

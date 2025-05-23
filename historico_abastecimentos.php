@@ -28,42 +28,42 @@ $pagina_atual = isset($_GET['pagina']) ? intval($_GET['pagina']) : 1;
 $offset = ($pagina_atual - 1) * $registros_por_pagina;
 
 // Construir a consulta SQL base
-$sql_base = "SELECT h.*, 
-                    DATE_FORMAT(h.data_alteracao, '%d/%m/%Y %H:%i:%s') as data_formatada,
+$sql_base = "SELECT ha.*, 
+                    DATE_FORMAT(ha.data_hora, '%d/%m/%Y %H:%i:%s') as data_formatada,
                     ra.placa
-             FROM historico_alteracoes h 
-             LEFT JOIN registro_abastecimento ra ON h.registro_id = ra.id
-             WHERE h.registro_id IN (SELECT id FROM registro_abastecimento)";
+             FROM historico_abastecimento ha 
+             LEFT JOIN registro_abastecimento ra ON ha.registro_id = ra.id
+             WHERE 1=1";
 $params = [];
 
 // Adicionar filtros à consulta
 if (!empty($tipo_operacao)) {
-    $sql_base .= " AND h.tipo_operacao = :tipo_operacao";
+    $sql_base .= " AND ha.tipo_operacao = :tipo_operacao";
     $params[':tipo_operacao'] = $tipo_operacao;
 }
 
 if (!empty($data_inicial)) {
-    $sql_base .= " AND DATE(h.data_alteracao) >= :data_inicial";
+    $sql_base .= " AND DATE(ha.data_hora) >= :data_inicial";
     $params[':data_inicial'] = $data_inicial;
 }
 
 if (!empty($data_final)) {
-    $sql_base .= " AND DATE(h.data_alteracao) <= :data_final";
+    $sql_base .= " AND DATE(ha.data_hora) <= :data_final";
     $params[':data_final'] = $data_final;
 }
 
 if (!empty($registro_id)) {
-    $sql_base .= " AND h.registro_id = :registro_id";
+    $sql_base .= " AND ha.registro_id = :registro_id";
     $params[':registro_id'] = $registro_id;
 }
 
 if (!empty($admin_name)) {
-    $sql_base .= " AND h.admin_name LIKE :admin_name";
+    $sql_base .= " AND ha.admin_nome LIKE :admin_name";
     $params[':admin_name'] = "%$admin_name%";
 }
 
 if (!empty($campo_alterado)) {
-    $sql_base .= " AND h.campo_alterado LIKE :campo_alterado";
+    $sql_base .= " AND ha.campo_alterado LIKE :campo_alterado";
     $params[':campo_alterado'] = "%$campo_alterado%";
 }
 
@@ -73,7 +73,7 @@ if (!empty($placa)) {
 }
 
 // Consulta para contar o total de registros
-$sql_count = str_replace("SELECT h.*, DATE_FORMAT(h.data_alteracao, '%d/%m/%Y %H:%i:%s') as data_formatada, ra.placa", "SELECT COUNT(*) as total", $sql_base);
+$sql_count = str_replace("SELECT ha.*, DATE_FORMAT(ha.data_hora, '%d/%m/%Y %H:%i:%s') as data_formatada, ra.placa", "SELECT COUNT(*) as total", $sql_base);
 $stmt_count = $conn->prepare($sql_count);
 foreach ($params as $key => $value) {
     $stmt_count->bindValue($key, $value);
@@ -84,7 +84,7 @@ $total_registros = $result['total'] ?? 0; // Corrigido para evitar erro de índi
 $total_paginas = ceil($total_registros / $registros_por_pagina);
 
 // Consulta para obter os registros da página atual
-$sql = $sql_base . " ORDER BY h.data_alteracao DESC LIMIT :offset, :limit";
+$sql = $sql_base . " ORDER BY ha.data_hora DESC LIMIT :offset, :limit";
 $stmt = $conn->prepare($sql);
 foreach ($params as $key => $value) {
     $stmt->bindValue($key, $value);
@@ -95,17 +95,13 @@ $stmt->execute();
 $historico = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Obter lista de usuários para o filtro
-$sql_usuarios = "SELECT DISTINCT admin_name FROM historico_alteracoes 
-                WHERE registro_id IN (SELECT id FROM registro_abastecimento)
-                ORDER BY admin_name";
+$sql_usuarios = "SELECT DISTINCT admin_nome FROM historico_abastecimento ORDER BY admin_nome";
 $stmt_usuarios = $conn->prepare($sql_usuarios);
 $stmt_usuarios->execute();
 $usuarios = $stmt_usuarios->fetchAll(PDO::FETCH_COLUMN);
 
 // Obter lista de campos alterados para o filtro
-$sql_campos = "SELECT DISTINCT campo_alterado FROM historico_alteracoes 
-               WHERE registro_id IN (SELECT id FROM registro_abastecimento)
-               ORDER BY campo_alterado";
+$sql_campos = "SELECT DISTINCT campo_alterado FROM historico_abastecimento ORDER BY campo_alterado";
 $stmt_campos = $conn->prepare($sql_campos);
 $stmt_campos->execute();
 $campos = $stmt_campos->fetchAll(PDO::FETCH_COLUMN);
@@ -284,6 +280,24 @@ function getOperationIcon($tipo_operacao) {
             return '<i class="fas fa-question-circle text-gray-500"></i>';
     }
 }
+
+// Contar totais por tipo de operação para o resumo 
+try {
+    $stmt_count_add = $conn->prepare("SELECT COUNT(*) FROM historico_abastecimento WHERE tipo_operacao = 'ADICAO'");
+    $stmt_count_add->execute();
+    $count_add = $stmt_count_add->fetchColumn();
+    
+    $stmt_count_edit = $conn->prepare("SELECT COUNT(*) FROM historico_abastecimento WHERE tipo_operacao = 'ALTERACAO'");
+    $stmt_count_edit->execute();
+    $count_edit = $stmt_count_edit->fetchColumn();
+    
+    $stmt_count_del = $conn->prepare("SELECT COUNT(*) FROM historico_abastecimento WHERE tipo_operacao = 'EXCLUSAO'");
+    $stmt_count_del->execute();
+    $count_del = $stmt_count_del->fetchColumn();
+} catch (PDOException $e) {
+    error_log("Erro ao contar operações: " . $e->getMessage());
+    $count_add = $count_edit = $count_del = 0;
+}
 ?>
 
 <!DOCTYPE html>
@@ -409,6 +423,8 @@ function getOperationIcon($tipo_operacao) {
         }
 
         /* Badge para status */
+        .badge {
+            display: inline-flex;        /* Badge para status */
         .badge {
             display: inline-flex;
             align-items: center;
@@ -562,13 +578,6 @@ function getOperationIcon($tipo_operacao) {
                 </div>
                 <div>
                     <h3 class="text-lg font-semibold text-gray-800">Adições</h3>
-                    <?php
-                    $stmt_count_add = $conn->prepare("SELECT COUNT(*) FROM historico_alteracoes 
-                                                     WHERE tipo_operacao = 'ADICAO' 
-                                                     AND registro_id IN (SELECT id FROM registro_abastecimento)");
-                    $stmt_count_add->execute();
-                    $count_add = $stmt_count_add->fetchColumn();
-                    ?>
                     <p class="text-2xl font-bold text-gray-700"><?= number_format($count_add, 0, ',', '.') ?></p>
                 </div>
             </div>
@@ -579,13 +588,6 @@ function getOperationIcon($tipo_operacao) {
                 </div>
                 <div>
                     <h3 class="text-lg font-semibold text-gray-800">Alterações</h3>
-                    <?php
-                    $stmt_count_edit = $conn->prepare("SELECT COUNT(*) FROM historico_alteracoes 
-                                                      WHERE tipo_operacao = 'ALTERACAO' 
-                                                      AND registro_id IN (SELECT id FROM registro_abastecimento)");
-                    $stmt_count_edit->execute();
-                    $count_edit = $stmt_count_edit->fetchColumn();
-                    ?>
                     <p class="text-2xl font-bold text-gray-700"><?= number_format($count_edit, 0, ',', '.') ?></p>
                 </div>
             </div>
@@ -596,13 +598,6 @@ function getOperationIcon($tipo_operacao) {
                 </div>
                 <div>
                     <h3 class="text-lg font-semibold text-gray-800">Exclusões</h3>
-                    <?php
-                    $stmt_count_del = $conn->prepare("SELECT COUNT(*) FROM historico_alteracoes 
-                                                     WHERE tipo_operacao = 'EXCLUSAO' 
-                                                     AND registro_id IN (SELECT id FROM registro_abastecimento)");
-                    $stmt_count_del->execute();
-                    $count_del = $stmt_count_del->fetchColumn();
-                    ?>
                     <p class="text-2xl font-bold text-gray-700"><?= number_format($count_del, 0, ',', '.') ?></p>
                 </div>
             </div>
@@ -646,10 +641,10 @@ function getOperationIcon($tipo_operacao) {
                                     <td class="px-6 py-4 whitespace-nowrap">
                                         <div class="flex items-center">
                                             <div class="flex-shrink-0 h-8 w-8 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-800 font-bold">
-                                                <?= strtoupper(substr($item['admin_name'], 0, 1)) ?>
+                                                <?= strtoupper(substr($item['admin_nome'], 0, 1)) ?>
                                             </div>
                                             <div class="ml-4">
-                                                <div class="text-sm font-medium text-gray-900"><?= htmlspecialchars($item['admin_name']) ?></div>
+                                                <div class="text-sm font-medium text-gray-900"><?= htmlspecialchars($item['admin_nome']) ?></div>
                                                 <div class="text-xs text-gray-500">ID: <?= $item['admin_id'] ?></div>
                                             </div>
                                         </div>
@@ -722,10 +717,10 @@ function getOperationIcon($tipo_operacao) {
                             
                             <div class="flex items-center mb-3">
                                 <div class="flex-shrink-0 h-8 w-8 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-800 font-bold">
-                                    <?= strtoupper(substr($item['admin_name'], 0, 1)) ?>
+                                    <?= strtoupper(substr($item['admin_nome'], 0, 1)) ?>
                                 </div>
                                 <div class="ml-2">
-                                    <div class="text-sm font-medium text-gray-900"><?= htmlspecialchars($item['admin_name']) ?></div>
+                                    <div class="text-sm font-medium text-gray-900"><?= htmlspecialchars($item['admin_nome']) ?></div>
                                     <div class="text-xs text-gray-500">ID: <?= $item['admin_id'] ?></div>
                                 </div>
                             </div>
