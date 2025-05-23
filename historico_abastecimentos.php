@@ -472,7 +472,7 @@ function getOperationIcon($tipo_operacao) {
                 <h1 class="text-xl font-bold">Histórico de Abastecimentos</h1>
             </div>
             <div>
-                <a href="gerenciar_abastecimentos.php"
+                <a href="alterar_abastecimentos.php"
                    class="flex items-center space-x-2 bg-white/20 hover:bg-white/30 px-4 py-2 rounded-lg transition"
                    aria-label="Voltar">
                     <i class="fas fa-arrow-left"></i>
