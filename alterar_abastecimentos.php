@@ -15,133 +15,127 @@ $conn->exec("SET NAMES utf8");
 // Variáveis para registrar o usuário logado e data atual
 $usuario_logado = $_SESSION['username'] ?? 'desconhecido';
 $data_hora_atual = date('Y-m-d H:i:s');
+$ip_usuario = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
 
-// Função para registrar alterações no histórico
-function registrarAlteracao($conn, $registro_id, $admin_id, $campo_alterado, $valor_antigo, $valor_novo, $tipo_operacao = 'ALTERACAO', $registro_completo = null) {
-    // Buscar o nome do admin na tabela usuarios
-    $query_admin = "SELECT name FROM usuarios WHERE id = :admin_id";
-    $stmt_admin = $conn->prepare($query_admin);
-    $stmt_admin->bindParam(':admin_id', $admin_id);
-    $stmt_admin->execute();
-    $admin = $stmt_admin->fetch(PDO::FETCH_ASSOC);
-    $admin_name = $admin['name'] ?? 'Desconhecido';
-
-    // Truncar valores se necessário para caber no campo
-    $valor_antigo = is_string($valor_antigo) ? substr($valor_antigo, 0, 65000) : $valor_antigo;
-    $valor_novo = is_string($valor_novo) ? substr($valor_novo, 0, 65000) : $valor_novo;
-    
-    // Converter arrays ou objetos para JSON
-    if (is_array($valor_antigo) || is_object($valor_antigo)) {
-        $valor_antigo = json_encode($valor_antigo, JSON_UNESCAPED_UNICODE);
+// Função simplificada para registrar operações no histórico (apenas um registro por operação)
+function registrarOperacao($conn, $registro_id, $admin_id, $tipo_operacao, $dados_antes = null, $dados_depois = null) {
+    try {
+        // Buscar o nome do admin na tabela usuarios
+        $query_admin = "SELECT name FROM usuarios WHERE id = :admin_id";
+        $stmt_admin = $conn->prepare($query_admin);
+        $stmt_admin->bindParam(':admin_id', $admin_id);
+        $stmt_admin->execute();
+        $admin = $stmt_admin->fetch(PDO::FETCH_ASSOC);
+        $admin_nome = $admin['name'] ?? 'Desconhecido';
+        
+        // Preparar os dados de registro completo
+        $registro_completo = null;
+        
+        // Para alteração, preparar diferenças
+        if ($tipo_operacao === 'ALTERACAO' && $dados_antes && $dados_depois) {
+            $registro_completo = json_encode([
+                'antes' => $dados_antes,
+                'depois' => $dados_depois
+            ], JSON_UNESCAPED_UNICODE);
+        } 
+        // Para adição, registrar dados do novo registro
+        else if ($tipo_operacao === 'ADICAO' && $dados_depois) {
+            $registro_completo = json_encode($dados_depois, JSON_UNESCAPED_UNICODE);
+        }
+        // Para exclusão, registrar dados do registro excluído
+        else if ($tipo_operacao === 'EXCLUSAO' && $dados_antes) {
+            $registro_completo = json_encode($dados_antes, JSON_UNESCAPED_UNICODE);
+        }
+        
+        // Inserir no histórico
+        $query = "INSERT INTO historico_abastecimento (
+                    registro_id, 
+                    admin_id, 
+                    admin_nome, 
+                    tipo_operacao,
+                    campo_alterado,
+                    valor_antigo,
+                    valor_novo, 
+                    registro_completo, 
+                    data_hora, 
+                    ip_usuario
+                  ) VALUES (
+                    :registro_id, 
+                    :admin_id, 
+                    :admin_nome, 
+                    :tipo_operacao,
+                    'REGISTRO_COMPLETO',
+                    :valor_antigo,
+                    :valor_novo,
+                    :registro_completo, 
+                    NOW(), 
+                    :ip_usuario
+                  )";
+        
+        $stmt = $conn->prepare($query);
+        $stmt->bindParam(':registro_id', $registro_id);
+        $stmt->bindParam(':admin_id', $admin_id);
+        $stmt->bindParam(':admin_nome', $admin_nome);
+        $stmt->bindParam(':tipo_operacao', $tipo_operacao);
+        
+        // Definir valores antigos e novos com base na operação
+        $valor_antigo = ($tipo_operacao === 'EXCLUSAO') ? 'Registro excluído' : ($tipo_operacao === 'ALTERACAO' ? 'Registro alterado' : 'N/A');
+        $valor_novo = ($tipo_operacao === 'ADICAO') ? 'Registro adicionado' : ($tipo_operacao === 'ALTERACAO' ? 'Registro alterado' : 'N/A');
+        
+        $stmt->bindParam(':valor_antigo', $valor_antigo);
+        $stmt->bindParam(':valor_novo', $valor_novo);
+        $stmt->bindParam(':registro_completo', $registro_completo);
+        $stmt->bindParam(':ip_usuario', $ip_usuario);
+        
+        return $stmt->execute();
+    } catch (Exception $e) {
+        error_log("Erro ao registrar operação no histórico: " . $e->getMessage());
+        return false;
     }
-    
-    if (is_array($valor_novo) || is_object($valor_novo)) {
-        $valor_novo = json_encode($valor_novo, JSON_UNESCAPED_UNICODE);
-    }
-    
-    // Preparar a query para inserção no histórico de alterações
-    $query = "INSERT INTO historico_alteracoes (registro_id, admin_id, admin_name, campo_alterado, valor_antigo, valor_novo, tipo_operacao, registro_completo)
-              VALUES (:registro_id, :admin_id, :admin_name, :campo_alterado, :valor_antigo, :valor_novo, :tipo_operacao, :registro_completo)";
-    
-    $stmt = $conn->prepare($query);
-    $stmt->bindParam(':registro_id', $registro_id);
-    $stmt->bindParam(':admin_id', $admin_id);
-    $stmt->bindParam(':admin_name', $admin_name);
-    $stmt->bindParam(':campo_alterado', $campo_alterado);
-    $stmt->bindParam(':valor_antigo', $valor_antigo);
-    $stmt->bindParam(':valor_novo', $valor_novo);
-    $stmt->bindParam(':tipo_operacao', $tipo_operacao);
-    $stmt->bindParam(':registro_completo', $registro_completo);
-    
-    return $stmt->execute();
-}
-
-// Função para registrar a adição completa de um registro
-function registrarAdicaoCompleta($conn, $registro_id, $admin_id, $dados_registro) {
-    global $usuario_logado, $data_hora_atual;
-    
-    // Converter o registro completo para JSON
-    $registro_completo = json_encode($dados_registro, JSON_UNESCAPED_UNICODE);
-    
-    // Registrar a adição como um único registro no histórico
-    registrarAlteracao(
-        $conn, 
-        $registro_id, 
-        $admin_id, 
-        'REGISTRO_COMPLETO', 
-        'N/A', 
-        'Registro adicionado', 
-        'ADICAO', 
-        $registro_completo
-    );
-}
-
-// Função para registrar a exclusão completa de um registro
-function registrarExclusaoCompleta($conn, $registro_id, $admin_id, $dados_registro) {
-    global $usuario_logado, $data_hora_atual;
-    
-    // Converter o registro completo para JSON
-    $registro_completo = json_encode($dados_registro, JSON_UNESCAPED_UNICODE);
-    
-    // Registrar a exclusão como um único registro no histórico
-    registrarAlteracao(
-        $conn, 
-        $registro_id, 
-        $admin_id, 
-        'REGISTRO_COMPLETO', 
-        'Registro excluído', 
-        'N/A', 
-        'EXCLUSAO', 
-        $registro_completo
-    );
-}
-
-// Verificar e remover a restrição de chave estrangeira se existir
-try {
-    // Verificar se existe restrição de chave estrangeira
-    $query_check = "
-        SELECT CONSTRAINT_NAME
-        FROM information_schema.KEY_COLUMN_USAGE
-        WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME = 'historico_alteracoes'
-        AND REFERENCED_TABLE_NAME = 'registro_abastecimento'
-        AND REFERENCED_COLUMN_NAME = 'id'
-    ";
-    $stmt_check = $conn->prepare($query_check);
-    $stmt_check->execute();
-    $constraint = $stmt_check->fetch(PDO::FETCH_ASSOC);
-    
-    if ($constraint) {
-        // Remover a restrição de chave estrangeira
-        $query_drop = "ALTER TABLE historico_alteracoes DROP FOREIGN KEY " . $constraint['CONSTRAINT_NAME'];
-        $conn->exec($query_drop);
-    }
-} catch (PDOException $e) {
-    // Ignorar erros, apenas seguir em frente
 }
 
 // Processar atualização de abastecimento se o formulário foi enviado
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['registro_id'])) {
-    $registro_id = $_POST['registro_id'];
-    $nome = $_POST['nome'];
-    $data = $_POST['data'];
-    $hora = $_POST['hora'];
-    $km_abastecido = $_POST['km_abastecido'];
-    $litros = $_POST['litros'];
-    $combustivel = $_POST['combustivel'];
-    $posto_gasolina = $_POST['posto_gasolina'];
-    $valor = $_POST['valor'];
-    $nota_fiscal = $_POST['nota_fiscal'];
-    $admin_id = $_SESSION['user_id'];
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['registro_id']) && !isset($_POST['action'])) {
+    try {
+        // Log para depuração
+        error_log("Tentativa de alteração de registro: ID=" . $_POST['registro_id']);
+        
+        // Iniciar transação para garantir integridade
+        $conn->beginTransaction();
+        
+        $registro_id = $_POST['registro_id'];
+        $nome = trim($_POST['nome']);
+        $data = $_POST['data'];
+        $hora = $_POST['hora'];
+        $km_abastecido = !empty($_POST['km_abastecido']) ? intval($_POST['km_abastecido']) : null;
+        $litros = floatval(str_replace(',', '.', $_POST['litros']));
+        $combustivel = trim($_POST['combustivel']);
+        $posto_gasolina = !empty($_POST['posto_gasolina']) && $_POST['posto_gasolina'] !== 'outro' ? 
+                            trim($_POST['posto_gasolina']) : 
+                            (!empty($_POST['outro_posto_modal']) ? trim($_POST['outro_posto_modal']) : null);
+        $valor = floatval(str_replace(',', '.', $_POST['valor']));
+        $nota_fiscal = !empty($_POST['nota_fiscal']) ? trim($_POST['nota_fiscal']) : null;
+        $admin_id = $_SESSION['user_id'];
 
-    // Buscar valores atuais antes da alteração
-    $query = "SELECT * FROM registro_abastecimento WHERE id = :id";
-    $stmt = $conn->prepare($query);
-    $stmt->bindParam(':id', $registro_id);
-    $stmt->execute();
-    $registro = $stmt->fetch(PDO::FETCH_ASSOC);
+        // Log dos dados para depuração
+        error_log("Dados para alteração: nome=$nome, data=$data, hora=$hora, km=$km_abastecido, litros=$litros, combustivel=$combustivel, posto=$posto_gasolina, valor=$valor");
+        
+        // Validação dos dados
+        if (empty($nome) || empty($data) || empty($hora) || empty($litros) || empty($combustivel) || empty($valor)) {
+            throw new Exception("Todos os campos obrigatórios devem ser preenchidos.");
+        }
 
-    if ($registro) {
+        // Buscar valores atuais antes da alteração
+        $query = "SELECT * FROM registro_abastecimento WHERE id = :id";
+        $stmt = $conn->prepare($query);
+        $stmt->bindParam(':id', $registro_id);
+        $stmt->execute();
+        $registro = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$registro) {
+            throw new Exception("Registro não encontrado.");
+        }
+
         $registro_antigo = $registro; // Salvar registro completo antes da alteração
         
         // Atualizar os valores no banco de dados
@@ -177,65 +171,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['registro_id'])) {
             $stmt->execute();
             $registro_novo = $stmt->fetch(PDO::FETCH_ASSOC);
             
-            // Registrar alterações específicas
-            $campos = [
-                'nome' => 'nome',
-                'data' => 'data',
-                'hora' => 'hora',
-                'km_abastecido' => 'km_abastecido',
-                'litros' => 'litros',
-                'combustivel' => 'combustivel',
-                'posto_gasolina' => 'posto_gasolina',
-                'valor' => 'valor',
-                'nota_fiscal' => 'nota_fiscal'
-            ];
-            
-            $camposAlterados = false;
-            
-            foreach ($campos as $campo => $rotulo) {
-                // Comparar como strings para garantir que a comparação funcione corretamente
-                $valorAntigo = isset($registro[$campo]) ? (string)$registro[$campo] : '';
-                $valorNovo = isset($_POST[$campo]) ? (string)$_POST[$campo] : '';
-                
-                if ($valorAntigo !== $valorNovo) {
-                    registrarAlteracao(
-                        $conn, 
-                        $registro_id, 
-                        $admin_id, 
-                        $campo, 
-                        $valorAntigo, 
-                        $valorNovo, 
-                        'ALTERACAO'
-                    );
-                    $camposAlterados = true;
-                }
-            }
-            
-            // Registrar alteração do registro completo apenas se houve alterações
-            if ($camposAlterados) {
-                $registro_completo = json_encode([
-                    'antes' => $registro_antigo,
-                    'depois' => $registro_novo
-                ], JSON_UNESCAPED_UNICODE);
-                
-                registrarAlteracao(
-                    $conn, 
-                    $registro_id, 
-                    $admin_id, 
-                    'REGISTRO_COMPLETO', 
-                    json_encode($registro_antigo, JSON_UNESCAPED_UNICODE), 
-                    json_encode($registro_novo, JSON_UNESCAPED_UNICODE), 
-                    'ALTERACAO',
-                    $registro_completo
-                );
-            }
+            // Registrar a alteração (apenas um registro)
+            registrarOperacao($conn, $registro_id, $admin_id, 'ALTERACAO', $registro_antigo, $registro_novo);
 
+            // Log do resultado da alteração para depuração
+            error_log("Alteração bem-sucedida: ID=$registro_id");
+            
+            // Confirmar transação
+            $conn->commit();
+            
             $_SESSION['mensagem'] = "Registro atualizado com sucesso!";
             $_SESSION['tipo_mensagem'] = "success";
         } else {
+            $conn->rollBack();
             $_SESSION['mensagem'] = "Erro ao atualizar registro.";
             $_SESSION['tipo_mensagem'] = "error";
+            error_log("Falha na execução do UPDATE: " . print_r($stmt->errorInfo(), true));
         }
+    } catch (Exception $e) {
+        if (isset($conn) && $conn->inTransaction()) {
+            $conn->rollBack();
+        }
+        $_SESSION['mensagem'] = "Erro: " . $e->getMessage();
+        $_SESSION['tipo_mensagem'] = "error";
+        error_log("Exceção ao alterar registro: " . $e->getMessage());
     }
 
     header("Location: gerenciar_abastecimentos.php?" . $_SERVER['QUERY_STRING']);
@@ -245,24 +204,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['registro_id'])) {
 // Processar adição de novo registro
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'adicionar') {
     try {
-        $nome = trim($_POST['nome']);
-        $data = $_POST['data'];
-        $hora = $_POST['hora'];
-        $prefixo = !empty($_POST['prefixo']) ? trim($_POST['prefixo']) : null;
-        $placa = trim($_POST['placa']);
-        $veiculo = trim($_POST['veiculo']);
-        $secretaria = !empty($_POST['secretaria']) ? trim($_POST['secretaria']) : null;
-        $km_abastecido = !empty($_POST['km_abastecido']) ? intval($_POST['km_abastecido']) : null;
-        $litros = floatval($_POST['litros']);
-        $combustivel = trim($_POST['combustivel']);
-        $posto_gasolina = !empty($_POST['posto_gasolina']) ? trim($_POST['posto_gasolina']) : null;
-        $valor = floatval($_POST['valor']);
-        $nota_fiscal = !empty($_POST['nota_fiscal']) ? trim($_POST['nota_fiscal']) : null;
+        // Log para depuração
+        error_log("Tentativa de adição de novo registro de abastecimento");
+
+        $nome = isset($_POST['nome']) ? trim($_POST['nome']) : '';
+        $data = isset($_POST['data']) ? $_POST['data'] : '';
+        $hora = isset($_POST['hora']) ? $_POST['hora'] : '';
+        $prefixo = isset($_POST['prefixo']) && !empty($_POST['prefixo']) ? trim($_POST['prefixo']) : null;
+        $placa = isset($_POST['placa']) ? trim($_POST['placa']) : '';
+        $veiculo = isset($_POST['veiculo']) ? trim($_POST['veiculo']) : '';
+        $secretaria = isset($_POST['secretaria']) && !empty($_POST['secretaria']) ? trim($_POST['secretaria']) : null;
+        $km_abastecido = isset($_POST['km_abastecido']) && !empty($_POST['km_abastecido']) ? intval($_POST['km_abastecido']) : null;
+        $litros = isset($_POST['litros']) ? floatval(str_replace(',', '.', $_POST['litros'])) : 0;
+        $combustivel = isset($_POST['combustivel']) ? trim($_POST['combustivel']) : '';
+        $posto_gasolina = isset($_POST['posto_gasolina']) && !empty($_POST['posto_gasolina']) && $_POST['posto_gasolina'] !== 'outro' ? 
+                            trim($_POST['posto_gasolina']) : 
+                            (isset($_POST['outro_posto']) && !empty($_POST['outro_posto']) ? trim($_POST['outro_posto']) : null);
+        $valor = isset($_POST['valor']) ? floatval(str_replace(',', '.', $_POST['valor'])) : 0;
+        $nota_fiscal = isset($_POST['nota_fiscal']) && !empty($_POST['nota_fiscal']) ? trim($_POST['nota_fiscal']) : null;
         $admin_id = $_SESSION['user_id'];
         
-        // Validação de dados
-        if (empty($nome) || empty($data) || empty($hora) || empty($placa) || empty($veiculo) || empty($litros) || empty($combustivel) || empty($valor)) {
-            throw new Exception("Todos os campos obrigatórios devem ser preenchidos.");
+        // Log dos dados para depuração
+        error_log("Dados para adição: nome=$nome, data=$data, hora=$hora, prefixo=$prefixo, placa=$placa, veiculo=$veiculo, km=$km_abastecido, litros=$litros, combustivel=$combustivel, posto=$posto_gasolina, valor=$valor");
+
+        // Verificando campos obrigatórios individualmente para mensagem de erro mais precisa
+        $campos_faltando = [];
+        if (empty($nome)) $campos_faltando[] = 'Nome do Motorista';
+        if (empty($data)) $campos_faltando[] = 'Data';
+        if (empty($hora)) $campos_faltando[] = 'Hora';
+        if (empty($placa)) $campos_faltando[] = 'Placa do Veículo';
+        if (empty($veiculo)) $campos_faltando[] = 'Veículo';
+        if (empty($litros) || $litros <= 0) $campos_faltando[] = 'Litros';
+        if (empty($combustivel)) $campos_faltando[] = 'Combustível';
+        if (empty($valor) || $valor <= 0) $campos_faltando[] = 'Valor';
+        
+        // Se houver campos faltando, lança exceção com a lista
+        if (!empty($campos_faltando)) {
+            throw new Exception("Por favor, preencha os seguintes campos obrigatórios: " . implode(", ", $campos_faltando));
         }
         
         // Iniciar transação
@@ -306,16 +284,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             $stmt->execute();
             $registro_inserido = $stmt->fetch(PDO::FETCH_ASSOC);
             
-            // Registrar a adição completa no histórico
-            registrarAdicaoCompleta($conn, $registro_id, $admin_id, $registro_inserido);
+            // Registrar a adição (apenas um registro)
+            registrarOperacao($conn, $registro_id, $admin_id, 'ADICAO', null, $registro_inserido);
             
             $conn->commit();
             $_SESSION['mensagem'] = "Novo registro de abastecimento adicionado com sucesso!";
             $_SESSION['tipo_mensagem'] = "success";
+            error_log("Adição bem-sucedida: ID=$registro_id");
         } else {
             $conn->rollBack();
             $_SESSION['mensagem'] = "Erro ao adicionar novo registro.";
             $_SESSION['tipo_mensagem'] = "error";
+            error_log("Falha na execução do INSERT: " . print_r($stmt->errorInfo(), true));
         }
     } catch (PDOException $e) {
         if (isset($conn) && $conn->inTransaction()) {
@@ -323,12 +303,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         }
         $_SESSION['mensagem'] = "Erro ao adicionar registro: " . $e->getMessage();
         $_SESSION['tipo_mensagem'] = "error";
+        
+        // Log detalhado do erro para depuração
+        error_log("Erro PDO ao adicionar registro: " . $e->getMessage() . " | Código: " . $e->getCode() . " | Trace: " . $e->getTraceAsString());
     } catch (Exception $e) {
         if (isset($conn) && $conn->inTransaction()) {
             $conn->rollBack();
         }
         $_SESSION['mensagem'] = "Erro: " . $e->getMessage();
         $_SESSION['tipo_mensagem'] = "error";
+        
+        // Log detalhado do erro para depuração
+        error_log("Erro genérico ao adicionar registro: " . $e->getMessage() . " | Trace: " . $e->getTraceAsString());
     }
     
     header("Location: gerenciar_abastecimentos.php?" . $_SERVER['QUERY_STRING']);
@@ -337,10 +323,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
 // Processar exclusão de registro
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'excluir') {
-    $registro_id = $_POST['registro_id_excluir'];
-    $admin_id = $_SESSION['user_id'];
-    
     try {
+        $registro_id = $_POST['registro_id_excluir'];
+        $admin_id = $_SESSION['user_id'];
+        
+        // Log para depuração
+        error_log("Tentativa de exclusão de registro: ID=$registro_id");
+        
+        if (empty($registro_id)) {
+            throw new Exception("ID do registro não fornecido.");
+        }
+        
         // Iniciar transação
         $conn->beginTransaction();
         
@@ -351,38 +344,57 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $stmt->execute();
         $registro = $stmt->fetch(PDO::FETCH_ASSOC);
         
-        if ($registro) {
-            // Registrar a exclusão completa no histórico antes de excluir o registro
-            registrarExclusaoCompleta($conn, $registro_id, $admin_id, $registro);
-            
-            // Excluir o registro
-            $query = "DELETE FROM registro_abastecimento WHERE id = :id";
-            $stmt = $conn->prepare($query);
-            $stmt->bindParam(':id', $registro_id);
-            
-            if ($stmt->execute()) {
-                $conn->commit();
-                $_SESSION['mensagem'] = "Registro excluído com sucesso!";
-                $_SESSION['tipo_mensagem'] = "success";
-            } else {
-                $conn->rollBack();
-                $_SESSION['mensagem'] = "Erro ao excluir registro.";
-                $_SESSION['tipo_mensagem'] = "error";
-            }
+        if (!$registro) {
+            throw new Exception("Registro não encontrado.");
+        }
+        
+        // Registrar a exclusão (apenas um registro)
+        registrarOperacao($conn, $registro_id, $admin_id, 'EXCLUSAO', $registro, null);
+        
+        // Excluir o registro
+        $query = "DELETE FROM registro_abastecimento WHERE id = :id";
+        $stmt = $conn->prepare($query);
+        $stmt->bindParam(':id', $registro_id);
+        
+        if ($stmt->execute()) {
+            $conn->commit();
+            $_SESSION['mensagem'] = "Registro excluído com sucesso!";
+            $_SESSION['tipo_mensagem'] = "success";
+            error_log("Exclusão bem-sucedida: ID=$registro_id");
         } else {
             $conn->rollBack();
-            $_SESSION['mensagem'] = "Registro não encontrado.";
+            $_SESSION['mensagem'] = "Erro ao excluir registro.";
             $_SESSION['tipo_mensagem'] = "error";
+            error_log("Falha na execução do DELETE: " . print_r($stmt->errorInfo(), true));
         }
     } catch (PDOException $e) {
-        $conn->rollBack();
+        if (isset($conn) && $conn->inTransaction()) {
+            $conn->rollBack();
+        }
         $_SESSION['mensagem'] = "Erro ao excluir registro: " . $e->getMessage();
         $_SESSION['tipo_mensagem'] = "error";
+        
+        // Log detalhado do erro para depuração
+        error_log("Erro PDO ao excluir registro: " . $e->getMessage() . " | Código: " . $e->getCode() . " | Trace: " . $e->getTraceAsString());
+    } catch (Exception $e) {
+        if (isset($conn) && $conn->inTransaction()) {
+            $conn->rollBack();
+        }
+        $_SESSION['mensagem'] = "Erro: " . $e->getMessage();
+        $_SESSION['tipo_mensagem'] = "error";
+        
+        // Log detalhado do erro para depuração
+        error_log("Erro genérico ao excluir registro: " . $e->getMessage() . " | Trace: " . $e->getTraceAsString());
     }
     
     header("Location: gerenciar_abastecimentos.php?" . $_SERVER['QUERY_STRING']);
     exit;
 }
+
+// Configuração de paginação
+$registros_por_pagina = 20;
+$pagina_atual = isset($_GET['pagina']) ? (int)$_GET['pagina'] : 1;
+$inicio = ($pagina_atual - 1) * $registros_por_pagina;
 
 // Buscar registros com base nos filtros
 $prefixo_veiculo = $_GET['prefixo_veiculo'] ?? '';
@@ -390,8 +402,8 @@ $data_inicial = $_GET['data_inicial'] ?? '';
 $data_final = $_GET['data_final'] ?? '';
 $combustivel = $_GET['combustivel'] ?? '';
 
-// Função para buscar registros
-function buscarRegistros($conn, $prefixo_veiculo, $data_inicial, $data_final, $combustivel, $secretaria_admin_db, $role) {
+// Função para buscar registros com paginação
+function buscarRegistros($conn, $prefixo_veiculo, $data_inicial, $data_final, $combustivel, $secretaria_admin_db, $role, $inicio, $registros_por_pagina) {
     $query = "SELECT r.* FROM registro_abastecimento r
               LEFT JOIN veiculos v ON r.placa = v.placa
               WHERE 1=1";
@@ -399,7 +411,7 @@ function buscarRegistros($conn, $prefixo_veiculo, $data_inicial, $data_final, $c
     $params = [];
 
     if ($prefixo_veiculo) {
-        $query .= " AND v.prefixo LIKE :prefixo_veiculo";
+        $query .= " AND (v.veiculo LIKE :prefixo_veiculo OR r.prefixo LIKE :prefixo_veiculo OR r.veiculo LIKE :prefixo_veiculo)";
         $params[':prefixo_veiculo'] = "%$prefixo_veiculo%";
     }
 
@@ -420,14 +432,30 @@ function buscarRegistros($conn, $prefixo_veiculo, $data_inicial, $data_final, $c
         $params[':secretaria'] = $secretaria_admin_db;
     }
 
-    $query .= " ORDER BY r.data DESC, r.hora DESC";
+    // Contar total de registros para paginação
+    $query_count = str_replace("SELECT r.*", "SELECT COUNT(*) as total", $query);
+    $stmt_count = $conn->prepare($query_count);
+    foreach ($params as $key => $value) {
+        $stmt_count->bindValue($key, $value);
+    }
+    $stmt_count->execute();
+    $total_registros = $stmt_count->fetch(PDO::FETCH_ASSOC)['total'];
+
+    // Adicionar ordenação e limites para paginação
+    $query .= " ORDER BY r.data DESC, r.hora DESC LIMIT :inicio, :registros_por_pagina";
 
     $stmt = $conn->prepare($query);
     foreach ($params as $key => $value) {
         $stmt->bindValue($key, $value);
     }
+    $stmt->bindValue(':inicio', (int)$inicio, PDO::PARAM_INT);
+    $stmt->bindValue(':registros_por_pagina', (int)$registros_por_pagina, PDO::PARAM_INT);
     $stmt->execute();
-    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    return [
+        'registros' => $stmt->fetchAll(PDO::FETCH_ASSOC),
+        'total' => $total_registros
+    ];
 }
 
 // Função para buscar secretarias disponíveis
@@ -494,8 +522,13 @@ $secretaria_admin = $_SESSION['secretaria'] ?? '';
 $secretaria_admin_db = isset($secretarias_map[$secretaria_admin]) ? $secretarias_map[$secretaria_admin] : null;
 $role = $_SESSION['role'] ?? '';
 
-// Buscar registros
-$registros = buscarRegistros($conn, $prefixo_veiculo, $data_inicial, $data_final, $combustivel, $secretaria_admin_db, $role);
+// Buscar registros com paginação
+$resultado = buscarRegistros($conn, $prefixo_veiculo, $data_inicial, $data_final, $combustivel, $secretaria_admin_db, $role, $inicio, $registros_por_pagina);
+$registros = $resultado['registros'];
+$total_registros = $resultado['total'];
+
+// Calcular total de páginas
+$total_paginas = ceil($total_registros / $registros_por_pagina);
 
 // Buscar todas as secretarias disponíveis para o formulário de adição
 $secretarias_disponiveis = buscarSecretarias();
@@ -825,6 +858,54 @@ $hora_atual = date('H:i');
                 }
             }
         }
+
+        /* Paginação */
+        .pagination {
+            display: flex;
+            justify-content: center;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .pagination a, .pagination span {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 5px;
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid #E5E7EB;
+            background-color: white;
+            color: #4B5563;
+            text-decoration: none;
+            font-weight: 500;
+            min-width: 40px;
+            transition: all 0.2s;
+        }
+        
+        .pagination a:hover {
+            background-color: #F3F4F6;
+            border-color: #D1D5DB;
+        }
+        
+        .pagination .active {
+            background-color: #4F46E5;
+            color: white;
+            border-color: #4F46E5;
+        }
+        
+        .pagination .disabled {
+            color: #D1D5DB;
+            cursor: not-allowed;
+        }
+        
+        @media (max-width: 640px) {
+            .pagination a, .pagination span {
+                padding: 6px 10px;
+                margin: 0 2px;
+                margin-bottom: 8px;
+            }
+        }
     </style>
 </head>
 <body class="min-h-screen">
@@ -890,6 +971,11 @@ $hora_atual = date('H:i');
                         <i class="fas fa-search mr-2"></i> Pesquisar
                     </button>
                 </div>
+
+                <!-- Manter a paginação nos filtros se houver -->
+                <?php if (isset($_GET['pagina'])): ?>
+                    <input type="hidden" name="pagina" value="1">
+                <?php endif; ?>
             </form>
         </div>
 
@@ -903,7 +989,12 @@ $hora_atual = date('H:i');
 
         <!-- Tabela de Registros -->
         <div class="card p-4 md:p-6">
-            <h2 class="text-xl font-semibold text-gray-800 mb-4">Registros de Abastecimentos</h2>
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-semibold text-gray-800">Registros de Abastecimentos</h2>
+                <span class="text-sm text-gray-500">
+                    Mostrando <?= count($registros) ?> de <?= $total_registros ?> registros
+                </span>
+            </div>
 
             <?php if (count($registros) > 0): ?>
                 <!-- Versão Desktop da Tabela -->
@@ -1026,6 +1117,59 @@ $hora_atual = date('H:i');
                         </div>
                     <?php endforeach; ?>
                 </div>
+
+                <!-- Paginação -->
+                <?php if ($total_paginas > 1): ?>
+                <div class="pagination">
+                    <?php if ($pagina_atual > 1): ?>
+                        <a href="?<?= http_build_query(array_merge($_GET, ['pagina' => 1])) ?>" title="Primeira página">
+                            <i class="fas fa-angle-double-left"></i>
+                        </a>
+                        <a href="?<?= http_build_query(array_merge($_GET, ['pagina' => $pagina_atual - 1])) ?>" title="Página anterior">
+                            <i class="fas fa-angle-left"></i>
+                        </a>
+                    <?php else: ?>
+                        <span class="disabled"><i class="fas fa-angle-double-left"></i></span>
+                        <span class="disabled"><i class="fas fa-angle-left"></i></span>
+                    <?php endif; ?>
+
+                    <?php
+                    // Definir quantas páginas mostrar antes e depois da atual
+                    $max_links = 3;
+                    $start = max(1, $pagina_atual - $max_links);
+                    $end = min($total_paginas, $pagina_atual + $max_links);
+                    
+                    // Garante sempre mostrar no mínimo 2*$max_links + 1 links (se houver)
+                    if ($pagina_atual - $start < $max_links) {
+                        $end = min($total_paginas, $end + ($max_links - ($pagina_atual - $start)));
+                    }
+                    if ($end - $pagina_atual < $max_links) {
+                        $start = max(1, $start - ($max_links - ($end - $pagina_atual)));
+                    }
+                    
+                    for ($i = $start; $i <= $end; $i++):
+                    ?>
+                        <?php if ($i == $pagina_atual): ?>
+                            <span class="active"><?= $i ?></span>
+                        <?php else: ?>
+                            <a href="?<?= http_build_query(array_merge($_GET, ['pagina' => $i])) ?>"><?= $i ?></a>
+                        <?php endif; ?>
+                    <?php endfor; ?>
+
+                    <?php if ($pagina_atual < $total_paginas): ?>
+                        <a href="?<?= http_build_query(array_merge($_GET, ['pagina' => $pagina_atual + 1])) ?>" title="Próxima página">
+                            <i class="fas fa-angle-right"></i>
+                        </a>
+                        <a href="?<?= http_build_query(array_merge($_GET, ['pagina' => $total_paginas])) ?>" title="Última página">
+                            <i class="fas fa-angle-double-right"></i>
+                        </a>
+                    <?php else: ?>
+                        <span class="disabled"><i class="fas fa-angle-right"></i></span>
+                        <span class="disabled"><i class="fas fa-angle-double-right"></i></span>
+                    <?php endif; ?>
+                </div>
+                <?php endif; ?>
+
             <?php else: ?>
                 <div class="text-center py-8">
                     <i class="fas fa-gas-pump text-4xl text-gray-300 mb-4"></i>
@@ -1043,36 +1187,39 @@ $hora_atual = date('H:i');
             <h2 class="text-xl font-semibold mb-4">Editar Abastecimento</h2>
             <form id="formEdicao" method="post">
                 <input type="hidden" id="registro_id" name="registro_id">
+                <input type="hidden" id="modal_usuario_id" name="usuario_id" value="">
 
-                <div class="mb-4">
-                    <label for="nome" class="block text-sm font-medium text-gray-700 mb-2">Motorista</label>
-                    <input type="text" id="modal_nome" name="nome" class="w-full px-3 py-2 border rounded-md" required>
+                <div class="mb-4 suggestions-container">
+                    <label for="modal_nome" class="block text-sm font-medium text-gray-700 mb-2">Motorista</label>
+                    <input type="text" id="modal_nome" name="nome" class="w-full px-3 py-2 border rounded-md" 
+                           placeholder="Digite nome, CPF ou email" required oninput="buscarUsuariosModal(this.value)">
+                    <div id="modal_suggestions_usuarios" class="suggestions-list"></div>
                 </div>
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <div>
-                        <label for="data" class="block text-sm font-medium text-gray-700 mb-2">Data</label>
+                        <label for="modal_data" class="block text-sm font-medium text-gray-700 mb-2">Data</label>
                         <input type="date" id="modal_data" name="data" class="w-full px-3 py-2 border rounded-md" required>
                     </div>
                     <div>
-                        <label for="hora" class="block text-sm font-medium text-gray-700 mb-2">Hora</label>
+                        <label for="modal_hora" class="block text-sm font-medium text-gray-700 mb-2">Hora</label>
                         <input type="time" id="modal_hora" name="hora" class="w-full px-3 py-2 border rounded-md" required>
                     </div>
                 </div>
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <div>
-                        <label for="km_abastecido" class="block text-sm font-medium text-gray-700 mb-2">KM</label>
+                        <label for="modal_km_abastecido" class="block text-sm font-medium text-gray-700 mb-2">KM</label>
                         <input type="number" id="modal_km_abastecido" name="km_abastecido" class="w-full px-3 py-2 border rounded-md">
                     </div>
                     <div>
-                        <label for="litros" class="block text-sm font-medium text-gray-700 mb-2">Litros</label>
+                        <label for="modal_litros" class="block text-sm font-medium text-gray-700 mb-2">Litros</label>
                         <input type="number" step="0.01" id="modal_litros" name="litros" class="w-full px-3 py-2 border rounded-md" required>
                     </div>
                 </div>
                 
                 <div class="mb-4">
-                    <label for="combustivel" class="block text-sm font-medium text-gray-700 mb-2">Combustível</label>
+                    <label for="modal_combustivel" class="block text-sm font-medium text-gray-700 mb-2">Combustível</label>
                     <select id="modal_combustivel" name="combustivel" class="w-full px-3 py-2 border rounded-md" required>
                         <option value="Gasolina">Gasolina</option>
                         <option value="Etanol">Etanol</option>
@@ -1082,7 +1229,7 @@ $hora_atual = date('H:i');
                 </div>
                 
                 <div class="mb-4">
-                    <label for="posto_gasolina" class="block text-sm font-medium text-gray-700 mb-2">Posto de Combustível</label>
+                    <label for="modal_posto_gasolina" class="block text-sm font-medium text-gray-700 mb-2">Posto de Combustível</label>
                     <select id="modal_posto_gasolina" name="posto_gasolina" class="w-full px-3 py-2 border rounded-md">
                         <option value="">Selecione ou digite outro posto</option>
                         <option value="ABRANTES & ABRANTES LTDA">POSTO NORDESTE - ABRANTES & ABRANTES LTDA</option>
@@ -1093,7 +1240,7 @@ $hora_atual = date('H:i');
                         <option value="MELOSA TRANSPORTES">MELOSA TRANSPORTES</option>
                         <option value="POSTO MORADA">B&M - POSTO MORADA</option>
                         <option value="BRESCANSIN & BRESCANSIN LTDA">SMILLE - BRESCANSIN & BRESCANSIN LTDA</option>
-                        <option value="outro">Outro (especificar)</option>
+                        <option value="outro                        <option value="outro">Outro (especificar)</option>
                     </select>
                     <div id="outro_posto_modal_container" class="mt-2" style="display: none;">
                         <input type="text" id="outro_posto_modal" class="w-full px-3 py-2 border rounded-md" 
@@ -1103,11 +1250,11 @@ $hora_atual = date('H:i');
                 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <div>
-                        <label for="valor" class="block text-sm font-medium text-gray-700 mb-2">Valor (R$)</label>
+                        <label for="modal_valor" class="block text-sm font-medium text-gray-700 mb-2">Valor (R$)</label>
                         <input type="number" step="0.01" id="modal_valor" name="valor" class="w-full px-3 py-2 border rounded-md" required>
                     </div>
                     <div>
-                        <label for="nota_fiscal" class="block text-sm font-medium text-gray-700 mb-2">Nota Fiscal</label>
+                        <label for="modal_nota_fiscal" class="block text-sm font-medium text-gray-700 mb-2">Nota Fiscal</label>
                         <input type="text" id="modal_nota_fiscal" name="nota_fiscal" class="w-full px-3 py-2 border rounded-md">
                     </div>
                 </div>
@@ -1175,7 +1322,7 @@ $hora_atual = date('H:i');
 
                 <div class="grid grid-cols-1 gap-4 mb-4">
                     <div class="suggestions-container">
-                        <label for="nome" class="block text-sm font-medium text-gray-700 mb-2">Nome do Motorista</label>
+                        <label for="nome" class="block text-sm font-medium text-gray-700 mb-2">Nome do Motorista <span class="text-red-500">*</span></label>
                         <input type="text" id="nome" name="nome" class="w-full px-3 py-2 border rounded-md" 
                                placeholder="Digite nome, CPF ou email" required oninput="buscarUsuarios(this.value)">
                         <input type="hidden" id="usuario_id" name="usuario_id" value="">
@@ -1194,18 +1341,18 @@ $hora_atual = date('H:i');
 
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
                     <div class="suggestions-container">
-                        <label for="prefixo" class="block text-sm font-medium text-gray-700 mb-2">Prefixo</label>
+                        <label for="prefixo" class="block text-sm font-medium text-gray-700 mb-2">Prefixo <span class="text-red-500">*</span></label>
                         <input type="text" id="prefixo" name="prefixo" class="w-full px-3 py-2 border rounded-md" 
                                placeholder="Ex: C-32" required oninput="buscarVeiculosPorPrefixo(this.value)">
                         <div id="suggestions_prefixo" class="suggestions-list"></div>
                     </div>
                     <div>
-                        <label for="placa" class="block text-sm font-medium text-gray-700 mb-2">Placa</label>
+                        <label for="placa" class="block text-sm font-medium text-gray-700 mb-2">Placa <span class="text-red-500">*</span></label>
                         <input type="text" id="placa" name="placa" class="w-full px-3 py-2 border rounded-md" 
                                placeholder="Ex: ABC1234" required readonly>
                     </div>
                     <div>
-                        <label for="veiculo" class="block text-sm font-medium text-gray-700 mb-2">Veículo</label>
+                        <label for="veiculo" class="block text-sm font-medium text-gray-700 mb-2">Veículo <span class="text-red-500">*</span></label>
                         <input type="text" id="veiculo" name="veiculo" class="w-full px-3 py-2 border rounded-md" 
                                placeholder="Ex: Modelo do veículo" required readonly>
                     </div>
@@ -1213,12 +1360,12 @@ $hora_atual = date('H:i');
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <div>
-                        <label for="data" class="block text-sm font-medium text-gray-700 mb-2">Data</label>
+                        <label for="data" class="block text-sm font-medium text-gray-700 mb-2">Data <span class="text-red-500">*</span></label>
                         <input type="date" id="data" name="data" class="w-full px-3 py-2 border rounded-md" 
                                value="<?= $data_atual ?>" required>
                     </div>
                     <div>
-                        <label for="hora" class="block text-sm font-medium text-gray-700 mb-2">Hora</label>
+                        <label for="hora" class="block text-sm font-medium text-gray-700 mb-2">Hora <span class="text-red-500">*</span></label>
                         <input type="time" id="hora" name="hora" class="w-full px-3 py-2 border rounded-md" 
                                value="<?= $hora_atual ?>" required>
                     </div>
@@ -1231,7 +1378,7 @@ $hora_atual = date('H:i');
                                placeholder="Ex: 123456">
                     </div>
                     <div>
-                        <label for="litros" class="block text-sm font-medium text-gray-700 mb-2">Litros</label>
+                        <label for="litros" class="block text-sm font-medium text-gray-700 mb-2">Litros <span class="text-red-500">*</span></label>
                         <input type="number" step="0.01" id="litros" name="litros" class="w-full px-3 py-2 border rounded-md" 
                                placeholder="Ex: 45.50" required>
                     </div>
@@ -1239,12 +1386,10 @@ $hora_atual = date('H:i');
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <div>
-                        <label for="combustivel" class="block text-sm font-medium text-gray-700 mb-2">Combustível</label>
+                        <label for="combustivel" class="block text-sm font-medium text-gray-700 mb-2">Combustível <span class="text-red-500">*</span></label>
                         <select id="combustivel" name="combustivel" class="w-full px-3 py-2 border rounded-md" required>
                             <option value="">Selecione o combustível</option>
                             <option value="Gasolina">Gasolina</option>
-                            <option value="Etanol">Etanol</option>
-                                                        <option value="Gasolina">Gasolina</option>
                             <option value="Etanol">Etanol</option>
                             <option value="Diesel-S10">Diesel-S10</option>
                             <option value="Diesel-S500">Diesel-S500</option>
@@ -1273,7 +1418,7 @@ $hora_atual = date('H:i');
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                     <div>
-                        <label for="valor" class="block text-sm font-medium text-gray-700 mb-2">Valor (R$)</label>
+                        <label for="valor" class="block text-sm font-medium text-gray-700 mb-2">Valor (R$) <span class="text-red-500">*</span></label>
                         <input type="number" step="0.01" id="valor" name="valor" class="w-full px-3 py-2 border rounded-md" 
                                placeholder="Ex: 250.00" required>
                     </div>
@@ -1282,6 +1427,10 @@ $hora_atual = date('H:i');
                         <input type="text" id="nota_fiscal" name="nota_fiscal" class="w-full px-3 py-2 border rounded-md" 
                                placeholder="Ex: 123456789">
                     </div>
+                </div>
+
+                <div class="text-sm text-gray-500 mb-4">
+                    <p>Campos marcados com <span class="text-red-500">*</span> são obrigatórios.</p>
                 </div>
 
                 <div class="flex flex-col md:flex-row md:justify-end md:space-x-2">
@@ -1299,6 +1448,7 @@ $hora_atual = date('H:i');
     <script>
         // Funções para o modal de edição
         function abrirModalEdicao(id, nome, data, hora, km_abastecido, litros, combustivel, posto_gasolina, valor, nota_fiscal) {
+            console.log("Abrindo modal de edição para ID:", id);
             document.getElementById('registro_id').value = id;
             document.getElementById('modal_nome').value = nome;
             document.getElementById('modal_data').value = data;
@@ -1373,13 +1523,17 @@ $hora_atual = date('H:i');
 
         // Fechar os modais se clicar fora deles
         window.onclick = function(event) {
-            if (event.target == document.getElementById('modalEdicao')) {
+            const modalEdicao = document.getElementById('modalEdicao');
+            const modalExclusao = document.getElementById('modalExclusao');
+            const modalAdicao = document.getElementById('modalAdicao');
+            
+            if (event.target == modalEdicao) {
                 fecharModalEdicao();
             }
-            if (event.target == document.getElementById('modalExclusao')) {
+            if (event.target == modalExclusao) {
                 fecharModalExclusao();
             }
-            if (event.target == document.getElementById('modalAdicao')) {
+            if (event.target == modalAdicao) {
                 fecharModalAdicao();
             }
         }
@@ -1387,24 +1541,35 @@ $hora_atual = date('H:i');
         // Função para buscar veículos por prefixo
         function buscarVeiculos(prefixo) {
             if (prefixo.length >= 1) {
-                $.get('buscar_veiuculos_abastecimento.php', { termo: prefixo, tipo: 'prefixo' }, function(data) {
-                    const suggestions = $('#suggestions');
-                    suggestions.empty();
+                console.log("Buscando veículos com prefixo:", prefixo);
+                $.ajax({
+                    url: 'buscar_veiuculos_abastecimento.php',
+                    type: 'GET',
+                    data: { termo: prefixo, tipo: 'prefixo' },
+                    dataType: 'json',
+                    success: function(data) {
+                        console.log("Resultados recebidos:", data);
+                        const suggestions = $('#suggestions');
+                        suggestions.empty();
 
-                    if (data.length > 0) {
-                        data.forEach(function(veiculo) {
-                            suggestions.append(
-                                `<div class="suggestion-item" onclick="selecionarVeiculo('${veiculo.prefixo}')">
-                                    ${veiculo.prefixo} - ${veiculo.placa} (${veiculo.tipo || veiculo.veiculo})
-                                 </div>`
-                            );
-                        });
-                        suggestions.show();
-                    } else {
-                        suggestions.hide();
+                        if (data && data.length > 0) {
+                            data.forEach(function(veiculo) {
+                                suggestions.append(
+                                    `<div class="suggestion-item" onclick="selecionarVeiculo('${veiculo.prefixo}')">
+                                        ${veiculo.prefixo} - ${veiculo.placa} (${veiculo.tipo || veiculo.prefixo})
+                                     </div>`
+                                );
+                            });
+                            suggestions.show();
+                        } else {
+                            suggestions.append('<div class="suggestion-item">Nenhum veículo encontrado</div>');
+                            suggestions.show();
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        console.error("Erro ao buscar veículos:", error, "Status:", status, "Resposta:", xhr.responseText);
+                        $('#suggestions').html('<div class="suggestion-item">Erro ao buscar veículos</div>').show();
                     }
-                }).fail(function() {
-                    $('#suggestions').hide();
                 });
             } else {
                 $('#suggestions').hide();
@@ -1420,24 +1585,42 @@ $hora_atual = date('H:i');
         // Função para buscar veículos por prefixo para o modal de adição
         function buscarVeiculosPorPrefixo(prefixo) {
             if (prefixo.length >= 1) {
-                $.get('buscar_veiuculos_abastecimento.php', { termo: prefixo, tipo: 'prefixo' }, function(data) {
-                    const suggestions = $('#suggestions_prefixo');
-                    suggestions.empty();
+                console.log("Buscando veículos para adição com prefixo:", prefixo);
+                $.ajax({
+                    url: 'buscar_veiuculos_abastecimento.php',
+                    type: 'GET',
+                    data: { termo: prefixo, tipo: 'prefixo' },
+                    dataType: 'json',
+                    success: function(data) {
+                        console.log("Dados recebidos para adição:", data);
+                        
+                        const suggestions = $('#suggestions_prefixo');
+                        suggestions.empty();
 
-                    if (data.length > 0) {
-                        data.forEach(function(veiculo) {
-                            suggestions.append(
-                                `<div class="suggestion-item" onclick="selecionarVeiculoCompleto('${veiculo.prefixo}', '${veiculo.placa}', '${veiculo.tipo || veiculo.veiculo}', '${veiculo.secretaria || ''}')">
-                                    ${veiculo.prefixo} - ${veiculo.placa} (${veiculo.tipo || veiculo.veiculo})
-                                 </div>`
-                            );
-                        });
-                        suggestions.show();
-                    } else {
-                        suggestions.hide();
+                        if (data && data.length > 0) {
+                            data.forEach(function(veiculo) {
+                                // Escapar valores para evitar problemas com aspas
+                                const prefixoEscapado = veiculo.prefixo.replace(/'/g, "\\'").replace(/"/g, '\\"');
+                                const placaEscapada = veiculo.placa.replace(/'/g, "\\'").replace(/"/g, '\\"');
+                                const veiculoEscapado = (veiculo.tipo || veiculo.prefixo).replace(/'/g, "\\'").replace(/"/g, '\\"');
+                                const secretariaEscapada = veiculo.secretaria ? veiculo.secretaria.replace(/'/g, "\\'").replace(/"/g, '\\"') : '';
+                                
+                                suggestions.append(
+                                    `<div class="suggestion-item" onclick="selecionarVeiculoCompleto('${prefixoEscapado}', '${placaEscapada}', '${veiculoEscapado}', '${secretariaEscapada}')">
+                                        ${veiculo.prefixo} - ${veiculo.placa} (${veiculo.tipo || veiculo.prefixo})
+                                    </div>`
+                                );
+                            });
+                            suggestions.show();
+                        } else {
+                            suggestions.append('<div class="suggestion-item">Nenhum veículo encontrado</div>');
+                            suggestions.show();
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        console.error("Erro ao buscar veículos para adição:", error, "Status:", status, "Resposta:", xhr.responseText);
+                        $('#suggestions_prefixo').html('<div class="suggestion-item">Erro ao buscar veículos</div>').show();
                     }
-                }).fail(function() {
-                    $('#suggestions_prefixo').hide();
                 });
             } else {
                 $('#suggestions_prefixo').hide();
@@ -1446,6 +1629,7 @@ $hora_atual = date('H:i');
 
         // Função para selecionar um veículo completo da lista de sugestões
         function selecionarVeiculoCompleto(prefixo, placa, veiculo, secretaria) {
+            console.log("Veículo selecionado:", prefixo, placa, veiculo, secretaria);
             $('#prefixo').val(prefixo);
             $('#placa').val(placa);
             $('#veiculo').val(veiculo);
@@ -1459,6 +1643,7 @@ $hora_atual = date('H:i');
             // Buscar último KM registrado para esse veículo, se existir função
             try {
                 $.get('buscar_ultimo_km_abastecimento.php', { placa: placa }, function(data) {
+                    console.log("Resposta KM:", data);
                     if (data && data.km_abastecido) {
                         $('#km_abastecido').val(data.km_abastecido);
                     }
@@ -1468,19 +1653,31 @@ $hora_atual = date('H:i');
             }
         }
 
-        // Função para buscar usuários
+        // Função para buscar usuários (modal de adição)
         function buscarUsuarios(termo) {
+            buscarUsuariosGenerico(termo, 'suggestions_usuarios', 'nome', 'usuario_id', 'secretaria');
+        }
+
+        // Função para buscar usuários (modal de edição)
+        function buscarUsuariosModal(termo) {
+            buscarUsuariosGenerico(termo, 'modal_suggestions_usuarios', 'modal_nome', 'modal_usuario_id');
+        }
+
+        // Função genérica para buscar usuários
+        function buscarUsuariosGenerico(termo, containerID, nomeID, idFieldID, secretariaID = null) {
             if (termo.length >= 2) {
+                console.log("Buscando usuários com termo:", termo);
                 $.ajax({
                     url: 'buscar_usuario.php',
                     type: 'GET',
                     data: { termo: termo },
                     dataType: 'json',
                     success: function(data) {
-                        const suggestions = $('#suggestions_usuarios');
+                        console.log("Usuários encontrados:", data);
+                        const suggestions = $(`#${containerID}`);
                         suggestions.empty();
 
-                        if (data.length > 0) {
+                        if (data && data.length > 0) {
                             data.forEach(function(usuario) {
                                 // Formatar informações adicionais para exibição
                                 let infoAdicional = [];
@@ -1501,8 +1698,12 @@ $hora_atual = date('H:i');
                                 const nomeEscapado = usuario.name.replace(/'/g, "\\'").replace(/"/g, '\\"');
                                 const secretariaEscapada = usuario.secretaria ? usuario.secretaria.replace(/'/g, "\\'").replace(/"/g, '\\"') : '';
                                 
+                                const onClickAction = secretariaID 
+                                    ? `selecionarUsuarioCompleto('${nomeEscapado}', '${secretariaEscapada}', ${usuario.id}, '${nomeID}', '${idFieldID}', '${secretariaID}', '${containerID}')`
+                                    : `selecionarUsuarioSimples('${nomeEscapado}', ${usuario.id}, '${nomeID}', '${idFieldID}', '${containerID}')`;
+                                
                                 suggestions.append(
-                                    `<div class="suggestion-item" onclick="selecionarUsuario('${nomeEscapado}', '${secretariaEscapada}', ${usuario.id})">
+                                    `<div class="suggestion-item" onclick="${onClickAction}">
                                         <div class="font-medium">${usuario.name}</div>
                                         <div class="text-xs text-gray-600">${infoText}</div>
                                     </div>`
@@ -1510,53 +1711,40 @@ $hora_atual = date('H:i');
                             });
                             suggestions.show();
                         } else {
-                            suggestions.hide();
+                            suggestions.append('<div class="suggestion-item">Nenhum usuário encontrado</div>');
+                            suggestions.show();
                         }
                     },
                     error: function(xhr, status, error) {
-                        console.log("Erro ao buscar usuários:", error);
-                        $('#suggestions_usuarios').hide();
+                        console.error("Erro ao buscar usuários:", error, "Status:", status, "Resposta:", xhr.responseText);
+                        $(`#${containerID}`).html('<div class="suggestion-item">Erro ao buscar usuários</div>').show();
                     }
                 });
             } else {
-                $('#suggestions_usuarios').hide();
+                $(`#${containerID}`).hide();
             }
         }
 
-        // Função para selecionar um usuário da lista de sugestões
-        function selecionarUsuario(nome, secretaria, userId) {
-            console.log("Selecionando usuário:", nome, secretaria, userId);
-            
-            // Preencher o campo de nome e armazenar o ID do usuário
-            $('#nome').val(nome);
-            $('#usuario_id').val(userId);
-            $('#suggestions_usuarios').hide();
+        // Função simplificada para selecionar usuário (modal de edição)
+        function selecionarUsuarioSimples(nome, userId, nomeID, idFieldID, containerID) {
+            console.log("Selecionando usuário:", nome, userId);
+            $(`#${nomeID}`).val(nome);
+            $(`#${idFieldID}`).val(userId);
+            $(`#${containerID}`).hide();
+        }
+
+        // Função completa para selecionar usuário com secretaria (modal de adição)
+        function selecionarUsuarioCompleto(nome, secretaria, userId, nomeID, idFieldID, secretariaID, containerID) {
+            console.log("Selecionando usuário completo:", nome, secretaria, userId);
+            // Preencher o nome e ID do usuário
+            $(`#${nomeID}`).val(nome);
+            $(`#${idFieldID}`).val(userId);
+            $(`#${containerID}`).hide();
             
             // Preencher a secretaria automaticamente se disponível e o campo estiver vazio
-            if (secretaria && $('#secretaria').val() === '') {
-                // Mapear a secretaria para o formato correto se necessário
-                const secretariasDisponiveis = <?= json_encode($secretarias_disponiveis) ?>;
-                const secretariasMapeadas = <?= json_encode(array_flip($secretarias_map)) ?>; // Invertemos para facilitar
-                
-                // Verificar se a secretaria está diretamente nas secretarias disponíveis
-                if (secretariasDisponiveis.includes(secretaria)) {
-                    $('#secretaria').val(secretaria);
-                } else {
-                    // Verificar se é necessário mapear
-                    if (secretariasMapeadas[secretaria]) {
-                        const secretariaMapeada = secretariasMapeadas[secretaria];
-                        if (secretariasDisponiveis.includes(secretariaMapeada)) {
-                            $('#secretaria').val(secretariaMapeada);
-                        }
-                    }
-                    // Se não encontrou na inversão, tenta o mapeamento original
-                    else {
-                        const secretariasMapOriginais = <?= json_encode($secretarias_map) ?>;
-                        if (secretariasMapOriginais[secretaria] && secretariasDisponiveis.includes(secretariasMapOriginais[secretaria])) {
-                            $('#secretaria').val(secretariasMapOriginais[secretaria]);
-                        }
-                    }
-                }
+            if (secretaria && $(`#${secretariaID}`).val() === '') {
+                // Verificar diretamente se é uma secretaria válida
+                $(`#${secretariaID}`).val(secretaria);
             }
         }
 
@@ -1584,10 +1772,81 @@ $hora_atual = date('H:i');
 
         // Ajustar o formEdicao para lidar com campo "outro posto"
         $("#formEdicao").on("submit", function(e) {
+            console.log("Formulário de edição sendo enviado");
+            
             if ($('#modal_posto_gasolina').val() === 'outro' && $('#outro_posto_modal').val().trim() !== '') {
                 // Substituir o valor do posto_gasolina pelo valor digitado em outro_posto_modal
                 $('#modal_posto_gasolina').val($('#outro_posto_modal').val().trim());
             }
+            
+            // Verificação adicional dos campos obrigatórios
+            let camposObrigatorios = ['modal_nome', 'modal_data', 'modal_hora', 'modal_litros', 'modal_combustivel', 'modal_valor'];
+            let temErro = false;
+            let camposFaltantes = [];
+            
+            camposObrigatorios.forEach(function(campo) {
+                let elemento = document.getElementById(campo);
+                if (elemento && !elemento.value.trim()) {
+                    console.error(`Campo obrigatório não preenchido: ${campo}`);
+                    elemento.classList.add('border-red-500');
+                    temErro = true;
+                    
+                    let labelElement = document.querySelector(`label[for="${campo}"]`);
+                    let labelText = labelElement ? labelElement.textContent.replace(' *', '') : campo;
+                    camposFaltantes.push(labelText);
+                } else if (elemento) {
+                    elemento.classList.remove('border-red-500');
+                }
+            });
+            
+            if (temErro) {
+                e.preventDefault();
+                alert("Por favor, preencha os seguintes campos obrigatórios: " + camposFaltantes.join(", "));
+                return false;
+            }
+            
+            console.log("Formulário de edição válido, enviando...");
+            return true;
+        });
+
+        // Ajustar o formAdicao para lidar com campo "outro posto"
+        $("#formAdicao").on("submit", function(e) {
+            console.log("Formulário de adição sendo enviado");
+            
+            // Verificar se o posto de gasolina é "outro" e ajustar o valor
+            if ($('#posto_gasolina').val() === 'outro' && $('#outro_posto').val().trim() !== '') {
+                // Substituir o valor do posto_gasolina pelo valor digitado em outro_posto
+                $('#posto_gasolina').val($('#outro_posto').val().trim());
+            }
+            
+            // Verificação adicional dos campos obrigatórios
+            let camposObrigatorios = ['nome', 'prefixo', 'placa', 'veiculo', 'data', 'hora', 'litros', 'combustivel', 'valor'];
+            let temErro = false;
+            let camposFaltantes = [];
+            
+            camposObrigatorios.forEach(function(campo) {
+                let elemento = document.getElementById(campo);
+                if (elemento && !elemento.value.trim()) {
+                    console.error(`Campo obrigatório não preenchido: ${campo}`);
+                    elemento.classList.add('border-red-500');
+                    temErro = true;
+                    
+                    let labelElement = document.querySelector(`label[for="${campo}"]`);
+                    let labelText = labelElement ? labelElement.textContent.replace(' *', '') : campo;
+                    camposFaltantes.push(labelText);
+                } else if (elemento) {
+                    elemento.classList.remove('border-red-500');
+                }
+            });
+            
+            if (temErro) {
+                e.preventDefault();
+                alert("Por favor, preencha os seguintes campos obrigatórios: " + camposFaltantes.join(", "));
+                return false;
+            }
+            
+            console.log("Formulário de adição válido, enviando...");
+            return true;
         });
 
         // Esconder sugestões quando clicar em outro lugar
@@ -1597,42 +1856,23 @@ $hora_atual = date('H:i');
             }
         });
 
-        // Verificar se há mensagens de erro no console
+        // Verificar se há mensagens de erro no console e inicializar a página
         $(document).ready(function() {
-            console.log("Página carregada em: <?= date('Y-m-d H:i:s') ?>");
-            console.log("Usuário: <?= $usuario_logado ?>");
+            console.log("Página carregada. Usuário: <?= $usuario_logado ?>, Data: <?= date('Y-m-d H:i:s') ?>");
+            console.log("Verificando se os scripts de busca estão funcionando...");
             
-            // Verificar e mostrar possíveis erros nos modais
-            $("#formAdicao").on("submit", function(e) {
-                // Verificar se o posto de gasolina é "outro" e ajustar o valor
-                if ($('#posto_gasolina').val() === 'outro' && $('#outro_posto').val().trim() !== '') {
-                    // Substituir o valor do posto_gasolina pelo valor digitado em outro_posto
-                    $('#posto_gasolina').val($('#outro_posto').val().trim());
+            // Tentativa inicial de busca para verificar se estão funcionando os arquivos
+            $.ajax({
+                url: 'buscar_veiuculos_abastecimento.php',
+                type: 'GET',
+                data: { termo: '' },
+                success: function(data) {
+                    console.log("Conexão com buscar_veiuculos_abastecimento.php está funcionando.");
+                },
+                error: function(xhr, status, error) {
+                    console.error("Erro na conexão com buscar_veiuculos_abastecimento.php:", error);
+                    alert("Existe um problema com a busca de veículos. Por favor, contate o administrador do sistema.");
                 }
-                
-                // Verificação adicional dos campos obrigatórios
-                let camposObrigatorios = ['nome', 'prefixo', 'placa', 'veiculo', 'data', 'hora', 'litros', 'combustivel', 'valor'];
-                let temErro = false;
-                
-                camposObrigatorios.forEach(function(campo) {
-                    let elemento = document.getElementById(campo);
-                    if (elemento && !elemento.value.trim()) {
-                        console.error(`Campo obrigatório não preenchido: ${campo}`);
-                        elemento.classList.add('border-red-500');
-                        temErro = true;
-                    } else if (elemento) {
-                        elemento.classList.remove('border-red-500');
-                    }
-                });
-                
-                if (temErro) {
-                    e.preventDefault();
-                    alert("Por favor, preencha todos os campos obrigatórios.");
-                    return false;
-                }
-                
-                console.log("Formulário de adição válido, enviando...");
-                return true;
             });
         });
     </script>
