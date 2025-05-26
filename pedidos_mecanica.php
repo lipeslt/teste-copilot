@@ -63,7 +63,7 @@ try {
         LEFT JOIN notificacoes n ON sm.notificacao_id = n.id
         LEFT JOIN ficha_defeito f ON sm.ficha_id = f.id
         WHERE sm.mecanico_id = :mecanico_id 
-        AND sm.status = 'aceito'";
+        AND sm.status IN ('aceito', 'em_andamento')";
     $stmtPedidos = $conn->prepare($queryPedidos);
     $stmtPedidos->bindParam(':mecanico_id', $_SESSION['user_id']);
     $stmtPedidos->execute();
@@ -77,9 +77,42 @@ try {
     $notificacoes_aceitas = $stmtNotificacoes->fetchAll(PDO::FETCH_ASSOC);
 
     // Serviços Finalizados
-    $queryFinalizados = "SELECT s.*, 'pedido' AS tipo_origem
-                         FROM servicos_mecanica s
-                         WHERE mecanico_id = :mecanico_id AND status = 'finalizado'";
+    $queryFinalizados = "
+        SELECT 
+            s.*,
+            CASE 
+                WHEN s.ficha_id IS NOT NULL THEN 'ficha'
+                WHEN s.notificacao_id IS NOT NULL THEN 'notificacao'
+                ELSE 'pedido'
+            END AS tipo_origem,
+            -- Dados da Notificação
+            n.mensagem as notificacao_mensagem,
+            n.data as notificacao_data,
+            n.status as notificacao_status,
+            n.prefixo as notificacao_prefixo,
+            n.secretaria as notificacao_secretaria,
+            -- Dados da Ficha
+            f.data as ficha_data,
+            f.hora as ficha_hora,
+            f.nome as ficha_nome,
+            f.nome_veiculo as ficha_nome_veiculo,
+            f.secretaria as ficha_secretaria,
+            f.suspensao, f.obs_suspensao,
+            f.motor, f.obs_motor,
+            f.freios, f.obs_freios,
+            f.direcao, f.obs_direcao,
+            f.sistema_eletrico, f.obs_sistema_eletrico,
+            f.carroceria, f.obs_carroceria,
+            f.embreagem, f.obs_embreagem,
+            f.rodas, f.obs_rodas,
+            f.transmissao_9500, f.obs_transmissao_9500,
+            f.caixa_mudancas, f.obs_caixa_mudancas,
+            f.alimentacao, f.obs_alimentacao,
+            f.arrefecimento, f.obs_arrefecimento
+        FROM servicos_mecanica s
+        LEFT JOIN notificacoes n ON s.notificacao_id = n.id
+        LEFT JOIN ficha_defeito f ON s.ficha_id = f.id
+        WHERE s.mecanico_id = :mecanico_id AND s.status = 'finalizado'";
     $stmtFinalizados = $conn->prepare($queryFinalizados);
     $stmtFinalizados->bindParam(':mecanico_id', $_SESSION['user_id']);
     $stmtFinalizados->execute();
@@ -169,6 +202,10 @@ try {
       background-color: #10B981;
       color: white;
     }
+    .badge-em-andamento {
+      background-color: #3B82F6;
+      color: white;
+    }
     .badge-concluido {
       background-color: #4F46E5;
       color: white;
@@ -196,6 +233,21 @@ try {
     .badge-pedido {
       background-color: #4F46E5;
       color: white;
+    }
+    .timer-container {
+      background-color: #f0f9ff;
+      border: 1px solid #bae6fd;
+      border-radius: 0.5rem;
+      padding: 0.75rem;
+      margin-top: 0.75rem;
+    }
+    .timer-display {
+      font-family: monospace;
+      font-size: 1.5rem;
+      font-weight: bold;
+      color: #0284c7;
+      text-align: center;
+      margin-bottom: 0.75rem;
     }
     @media (max-width: 640px) {
       .action-buttons {
@@ -251,12 +303,31 @@ try {
       const [modalContent, setModalContent] = React.useState(null);
       const [filtroOrigem, setFiltroOrigem] = React.useState('todos');
       const [tempoInicial, setTempoInicial] = React.useState(null);
-      const [tempoDecorrid, setTempoDecorrid] = React.useState(0);
-      const [timerInterval, setTimerInterval] = React.useState(null);
+      const [tempoDecorrido, setTempoDecorrido] = React.useState(0);
+      const [timerInterval, setTimerInterval] = React.useState({});
       const [activeServiceId, setActiveServiceId] = React.useState(null);
       const [notificacoesDisponiveisState, setNotificacoesDisponiveis] = React.useState(window.notificacoesDisponiveis);
       const [fichasDisponiveisState, setFichasDisponiveis] = React.useState(window.fichasDisponiveis);
       const [pedidosAtivosState, setPedidosAtivos] = React.useState(window.pedidosAtivos);
+      const [timers, setTimers] = React.useState({});
+
+      React.useEffect(() => {
+        // Verifica se há serviços em andamento ao carregar a página
+        const servicosEmAndamento = pedidosAtivosState.filter(pedido => pedido.status === 'em_andamento');
+        
+        servicosEmAndamento.forEach(servico => {
+          if (servico.inicio_servico) {
+            iniciarTimerParaServico(servico.id, new Date(servico.inicio_servico));
+          }
+        });
+
+        return () => {
+          // Limpa todos os timers ao desmontar o componente
+          Object.keys(timerInterval).forEach(key => {
+            if (timerInterval[key]) clearInterval(timerInterval[key]);
+          });
+        };
+      }, []);
 
       const formatDate = (dateString) => {
         if (!dateString) return 'Sem informações';
@@ -264,114 +335,158 @@ try {
         return new Date(dateString).toLocaleDateString('pt-BR', options);
       };
 
+      const iniciarTimerParaServico = (servicoId, startTime) => {
+        // Garantir que startTime seja um objeto Date válido
+        const inicio = startTime instanceof Date ? startTime : new Date();
+        
+        // Calcular tempo já decorrido (em segundos) - garantir que seja um valor positivo
+        const agora = new Date();
+        let tempoDesdeCriacao = Math.max(0, Math.floor((agora - inicio) / 1000));
+        
+        // Atualiza o estado com o tempo inicial para este serviço
+        setTimers(prev => {
+          const newTimers = {...prev};
+          if (!newTimers[servicoId]) {
+            newTimers[servicoId] = {};
+          }
+          newTimers[servicoId].tempoDecorrido = tempoDesdeCriacao;
+          newTimers[servicoId].startTime = inicio;
+          return newTimers;
+        });
+        
+        // Inicia o timer para este serviço
+        const intervalId = setInterval(() => {
+          setTimers(prev => {
+            const newTimers = {...prev};
+            if (!newTimers[servicoId]) {
+              newTimers[servicoId] = { tempoDecorrido: tempoDesdeCriacao + 1 };
+            } else {
+              const tempoAtual = newTimers[servicoId].tempoDecorrido || 0;
+              newTimers[servicoId].tempoDecorrido = tempoAtual + 1;
+            }
+            return newTimers;
+          });
+        }, 1000);
+        
+        // Salva o ID do intervalo
+        setTimerInterval(prev => {
+          const newIntervals = {...prev};
+          newIntervals[servicoId] = intervalId;
+          return newIntervals;
+        });
+        
+        return intervalId;
+      };
+
+      // Função para parar o timer de um serviço específico
+      const pararTimer = (servicoId) => {
+        if (timerInterval && timerInterval[servicoId]) {
+          clearInterval(timerInterval[servicoId]);
+          setTimerInterval(prev => {
+            const newTimers = {...prev};
+            delete newTimers[servicoId];
+            return newTimers;
+          });
+        }
+      };
+
       // Função para aceitar o serviço (apenas atualiza o status para 'aceito')
       const handleAceitarServico = async (tipo, id) => {
-  try {
-    const response = await fetch('aceitar_servico.php', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ tipo, id }),
-    });
+        try {
+          const response = await fetch('aceitar_servico.php', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ tipo, id }),
+          });
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.message || `HTTP error! status: ${response.status}`);
-    }
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.message || `HTTP error! status: ${response.status}`);
+          }
 
-    const data = await response.json();
-    
-    if (!data.success) {
-      throw new Error(data.message || 'Falha ao aceitar o serviço');
-    }
+          const data = await response.json();
+          
+          if (!data.success) {
+            throw new Error(data.message || 'Falha ao aceitar o serviço');
+          }
 
-    // Atualiza o estado local
-    if (tipo === 'ficha') {
-      setFichasDisponiveis(prev => prev.filter(f => f.id !== id));
-    } else if (tipo === 'notificacao') {
-      setNotificacoesDisponiveis(prev => prev.filter(n => n.id !== id));
-    }
+          // Atualiza o estado local
+          if (tipo === 'ficha') {
+            setFichasDisponiveis(prev => prev.filter(f => f.id !== id));
+          } else if (tipo === 'notificacao') {
+            setNotificacoesDisponiveis(prev => prev.filter(n => n.id !== id));
+          }
 
-    // Recarrega os pedidos ativos
-    await fetchPedidosAtivos();
-    
-    Swal.fire({
-      title: 'Sucesso!',
-      text: 'Serviço aceito com sucesso! Agora você pode iniciá-lo quando quiser.',
-      icon: 'success',
-      confirmButtonText: 'OK'
-    });
-    
-  } catch (error) {
-    console.error('Erro:', error);
-    Swal.fire({
-      title: 'Erro!',
-      text: error.message || 'Erro ao aceitar serviço',
-      icon: 'error',
-      confirmButtonText: 'OK'
-    });
-  }
-};
+          // Recarrega os pedidos ativos
+          await fetchPedidosAtivos();
+          
+          Swal.fire({
+            title: 'Sucesso!',
+            text: 'Serviço aceito com sucesso! Agora você pode iniciá-lo quando quiser.',
+            icon: 'success',
+            confirmButtonText: 'OK'
+          });
+          
+        } catch (error) {
+          console.error('Erro:', error);
+          Swal.fire({
+            title: 'Erro!',
+            text: error.message || 'Erro ao aceitar serviço',
+            icon: 'error',
+            confirmButtonText: 'OK'
+          });
+        }
+      };
 
       // Função para iniciar um serviço já aceito
-      const handleIniciarServico = async (tipo, id) => {
-  try {
-    const response = await fetch('iniciar_servico.php', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        tipo: tipo,
-        id: id
-      }),
-    });
+      const handleIniciarServico = async (id) => {
+        try {
+          const response = await fetch('iniciar_servico.php', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              id: id
+            }),
+          });
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.message || `Erro HTTP! Status: ${response.status}`);
-    }
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.message || `Erro HTTP! Status: ${response.status}`);
+          }
 
-    const data = await response.json();
-    
-    if (!data.success) {
-      throw new Error(data.message || 'Erro ao iniciar serviço');
-    }
+          const data = await response.json();
+          
+          if (!data.success) {
+            throw new Error(data.message || 'Erro ao iniciar serviço');
+          }
 
-    // Atualiza estado removendo o item das listas
-    if (tipo === 'ficha') {
-      setFichasDisponiveis(prev => prev.filter(f => f.id !== id));
-    } else if (tipo === 'notificacao') {
-      setNotificacoesDisponiveis(prev => prev.filter(n => n.id !== id));
-    }
+          // Inicia o timer para este serviço - usando a data atual para evitar valores negativos
+          iniciarTimerParaServico(id, new Date());
 
-    // Recarrega pedidos ativos
-    const pedidosResponse = await fetch('get_pedidos_ativos.php');
-    const pedidosData = await pedidosResponse.json();
-    
-    if (pedidosData.success) {
-      setPedidosAtivos(pedidosData.pedidos);
-    }
+          // Recarrega pedidos ativos
+          await fetchPedidosAtivos();
 
-    setActiveTab('pedidos');
-    Swal.fire({
-      title: 'Sucesso!',
-      text: 'Serviço iniciado com sucesso',
-      icon: 'success',
-      confirmButtonText: 'OK'
-    });
+          Swal.fire({
+            title: 'Sucesso!',
+            text: 'Serviço iniciado com sucesso',
+            icon: 'success',
+            confirmButtonText: 'OK'
+          });
 
-  } catch (error) {
-    console.error('Erro ao iniciar serviço:', error);
-    Swal.fire({
-      title: 'Erro!',
-      text: error.message || 'Erro ao iniciar serviço',
-      icon: 'error',
-      confirmButtonText: 'OK'
-    });
-  }
-};
+        } catch (error) {
+          console.error('Erro ao iniciar serviço:', error);
+          Swal.fire({
+            title: 'Erro!',
+            text: error.message || 'Erro ao iniciar serviço',
+            icon: 'error',
+            confirmButtonText: 'OK'
+          });
+        }
+      };
 
       const handleTempoTarefa = (pedidoId, tempo) => {
         fetch('atualizar_tempo.php', {
@@ -404,12 +519,16 @@ try {
 
       const handleFinalizarServico = async (pedidoId) => {
         try {
-          if (timerInterval) {
-            clearInterval(timerInterval);
-            setTimerInterval(null);
+          // Obtém o tempo decorrido do timer
+          let tempoTotal = 0;
+          if (timers[pedidoId] && typeof timers[pedidoId].tempoDecorrido !== 'undefined') {
+            tempoTotal = timers[pedidoId].tempoDecorrido;
           }
-          const finishTime = new Date().toISOString();
-          const totalTime = tempoDecorrid;
+          
+          // Para o timer
+          pararTimer(pedidoId);
+          
+          // Chama a API para finalizar o serviço
           const response = await fetch('finalizar_servico.php', {
             method: 'POST',
             headers: {
@@ -417,17 +536,26 @@ try {
             },
             body: JSON.stringify({
               pedido_id: pedidoId,
-              finish_time: finishTime,
-              total_time: totalTime
+              finish_time: new Date().toISOString(),
+              total_time: tempoTotal
             }),
           });
+          
           const data = await response.json();
           if (!data.success) {
             throw new Error(data.message || 'Falha ao finalizar serviço');
           }
-          await fetchPedidosAtivos();
-          setActiveTab('concluidos');
-          setActiveServiceId(null);
+          
+          // Remove o timer do estado
+          setTimers(prev => {
+            const newTimers = {...prev};
+            delete newTimers[pedidoId];
+            return newTimers;
+          });
+          
+          // Recarregar a página para atualizar todos os dados
+          window.location.reload();
+          
           Swal.fire({
             title: 'Sucesso!',
             text: 'Serviço finalizado com sucesso!',
@@ -446,9 +574,17 @@ try {
       };
 
       const formatarTempo = (segundos) => {
-        const mins = Math.floor(segundos / 60);
-        const secs = segundos % 60;
-        return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        if (typeof segundos !== 'number') return "00:00:00";
+        
+        const horas = Math.floor(segundos / 3600);
+        const minutos = Math.floor((segundos % 3600) / 60);
+        const segs = segundos % 60;
+        
+        return [
+          horas.toString().padStart(2, '0'),
+          minutos.toString().padStart(2, '0'),
+          segs.toString().padStart(2, '0')
+        ].join(':');
       };
 
       // Função para ver os detalhes do pedido/serviço
@@ -465,6 +601,18 @@ try {
                  (item.tipo_origem === 'ficha' ? 'Ficha' : 'Pedido'),
           className: item.tipo_origem === 'notificacao' ? 'badge-notificacao' :
                      (item.tipo_origem === 'ficha' ? 'badge-ficha' : 'badge-pedido')
+        });
+
+        // Status
+        informacoesBasicas.push({
+          type: 'badge',
+          label: 'Status',
+          value: item.status === 'aceito' ? 'Aceito' :
+                (item.status === 'em_andamento' ? 'Em andamento' :
+                (item.status === 'finalizado' ? 'Finalizado' : 'Pendente')),
+          className: item.status === 'aceito' ? 'badge-aceito' :
+                    (item.status === 'em_andamento' ? 'badge-em-andamento' :
+                    (item.status === 'finalizado' ? 'badge-concluido' : 'badge-pendente'))
         });
 
         // Informações do veículo
@@ -552,6 +700,14 @@ try {
               conteudoPrincipal.push({ label, value: texto });
             }
           });
+
+          // Adiciona observações se existirem
+          if (item.observacoes) {
+            conteudoPrincipal.push({
+              label: 'Observações',
+              value: item.observacoes
+            });
+          }
         }
         // Conteúdo principal - para pedidos
         else {
@@ -567,6 +723,31 @@ try {
               value: item.observacoes
             });
           }
+        }
+
+        // Adiciona informações de tempo
+        if (item.inicio_servico) {
+          informacoesBasicas.push({
+            type: 'text',
+            label: 'Início do Serviço',
+            value: formatDate(item.inicio_servico)
+          });
+        }
+        
+        if (item.data_conclusao) {
+          informacoesBasicas.push({
+            type: 'text',
+            label: 'Conclusão do Serviço',
+            value: formatDate(item.data_conclusao)
+          });
+        }
+        
+        if (item.tempo_real) {
+          informacoesBasicas.push({
+            type: 'text',
+            label: 'Tempo Total',
+            value: formatarTempo(item.tempo_real)
+          });
         }
 
         setModalContent(
@@ -707,8 +888,13 @@ try {
                             }
                           </p>
                         </div>
-                        <span className={`px-2 py-1 rounded-full text-xs ${pedido.tipo_origem === 'ficha' ? 'badge-ficha' : pedido.tipo_origem === 'notificacao' ? 'badge-notificacao' : 'badge-pedido'}`}>
-                          {pedido.tipo_origem === 'ficha' ? 'Ficha' : pedido.tipo_origem === 'notificacao' ? 'Notificação' : 'Pedido'}
+                        <span className={`px-2 py-1 rounded-full text-xs 
+                          ${pedido.status === 'em_andamento' ? 'badge-em-andamento' : 
+                           (pedido.tipo_origem === 'ficha' ? 'badge-ficha' : 
+                            pedido.tipo_origem === 'notificacao' ? 'badge-notificacao' : 'badge-pedido')}`}>
+                          {pedido.status === 'em_andamento' ? 'Em Andamento' : 
+                           (pedido.tipo_origem === 'ficha' ? 'Ficha' : 
+                            pedido.tipo_origem === 'notificacao' ? 'Notificação' : 'Pedido')}
                         </span>
                       </div>
                       <p className="my-2 text-gray-700 line-clamp-2">
@@ -724,6 +910,22 @@ try {
                             .map(([key, value]) => `${key}: ${value}`).join(' | ')
                          ) : pedido.observacoes}
                       </p>
+                      
+                      {/* Timer Container para serviços em andamento */}
+                      {pedido.status === 'em_andamento' && (
+                        <div className="timer-container">
+                          <div className="timer-display">
+                            {formatarTempo(timers[pedido.id] ? timers[pedido.id].tempoDecorrido : 0)}
+                          </div>
+                          <button
+                            onClick={() => handleFinalizarServico(pedido.id)}
+                            className="w-full bg-primary text-white py-2 rounded-lg hover:bg-primary/90 transition flex items-center justify-center gap-2">
+                            <i className="fas fa-check-circle"></i>
+                            <span>Finalizar Serviço</span>
+                          </button>
+                        </div>
+                      )}
+
                       <div className="flex justify-between items-center mt-3">
                         <span className="text-xs text-gray-500">
                           {formatDate(
@@ -739,7 +941,7 @@ try {
                               <span>Detalhes</span>
                           </button>
                           {pedido.status === 'aceito' && (
-                              <button onClick={() => handleIniciarServico(pedido.tipo_origem, pedido.id)}
+                              <button onClick={() => handleIniciarServico(pedido.id)}
                                   className="flex items-center gap-1 bg-green-100 text-green-600 px-3 py-1 rounded hover:bg-green-200 transition">
                                   <i className="fas fa-play"></i>
                                   <span>Iniciar</span>
@@ -856,17 +1058,33 @@ try {
                         <div>
                           <h3 className="font-bold text-lg">Serviço #{servico.id}</h3>
                           <p className="text-gray-600 text-sm">
-                            {servico.veiculo_id ? `Veículo ID: ${servico.veiculo_id}` : (servico.veiculo || 'Sem informações')}
-                            {servico.secretaria ? ` • ${servico.secretaria}` : ''}
+                            {servico.tipo_origem === 'ficha' ? 
+                                `${servico.ficha_nome_veiculo || 'Sem veículo'} • ${servico.ficha_secretaria || 'Sem secretaria'}` :
+                             servico.tipo_origem === 'notificacao' ?
+                                `Prefixo: ${servico.notificacao_prefixo || 'N/A'} • ${servico.notificacao_secretaria || 'Sem secretaria'}` :
+                                `${servico.nome_veiculo || 'Sem veículo'} • ${servico.secretaria || 'Sem secretaria'}`
+                            }
                           </p>
                         </div>
                         <span className="px-2 py-1 rounded-full text-xs badge-concluido">
                           Concluído
                         </span>
                       </div>
-                      <p className="my-2 text-gray-700 line-clamp-2">{servico.descricao_servico}</p>
+                      <p className="my-2 text-gray-700 line-clamp-2">
+                        {servico.tipo_origem === 'notificacao' ? servico.notificacao_mensagem :
+                         servico.tipo_origem === 'ficha' ? (
+                            Object.entries({
+                                'Suspensão': servico.suspensao,
+                                'Motor': servico.motor,
+                                'Freios': servico.freios,
+                                'Direção': servico.direcao,
+                                'Sistema Elétrico': servico.sistema_eletrico
+                            }).filter(([_, value]) => value)
+                            .map(([key, value]) => `${key}: ${value}`).join(' | ')
+                         ) : servico.observacoes}
+                      </p>
                       <div className="flex justify-between items-center mt-3">
-                        <span className="text-xs text-gray-500">{formatDate(servico.fim_servico)}</span>
+                        <span className="text-xs text-gray-500">{formatDate(servico.data_conclusao)}</span>
                         <div className="flex space-x-2 ml-auto">
                           <button onClick={() => handleVerDetalhes(servico)}
                               className="flex items-center gap-1 bg-blue-100 text-blue-600 px-3 py-1 rounded hover:bg-blue-200 transition">
@@ -891,7 +1109,7 @@ try {
             ].map((item) => (
               <button
                 key={item.tab}
-                className={`flex flex-col items-center p-2 transition-all ${item.tab === 'logout' ? 'text-red-500 hover:text-red-600' : (activeTab === item.tab ? 'text-primary' : 'text-gray-400 hover:text-primary')}`}
+                className={`flex flex-col items-center p-2 transition-all ${item.tab === 'logout' ? 'text-red-500 hover:text-red-600' : (activeTab === item.tab ? 'text-primary' : 'text-gray-400 hover:text-gray-600')}`}
                 onClick={() => {
                   if (item.tab === 'profile') {
                     window.location.href = 'perfil.php';

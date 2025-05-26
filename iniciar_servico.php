@@ -19,29 +19,20 @@ try {
         throw new Exception('JSON inválido', 400);
     }
 
-    if (empty($input['tipo']) || empty($input['id'])) {
-        throw new Exception('Dados incompletos: tipo e id são obrigatórios', 400);
+    if (empty($input['id'])) {
+        throw new Exception('ID do serviço é obrigatório', 400);
     }
 
     $conn->beginTransaction();
     $mecanico_id = $_SESSION['user_id'];
-    $tipo = $input['tipo'];
     $id = (int)$input['id'];
 
-    // Verificar se o serviço existe e está como 'aceito'
+    // Verificar se o serviço existe e está como 'aceito', independentemente da origem
     $sql = "SELECT id, notificacao_id, ficha_id FROM servicos_mecanica 
-            WHERE mecanico_id = ? AND status = 'aceito' AND (";
+            WHERE id = ? AND mecanico_id = ? AND status = 'aceito'";
     
-    if ($tipo === 'notificacao') {
-        $sql .= "notificacao_id = ?)";
-    } elseif ($tipo === 'ficha') {
-        $sql .= "ficha_id = ?)";
-    } else {
-        throw new Exception('Tipo de serviço inválido. Use "notificacao" ou "ficha"', 400);
-    }
-
     $stmt = $conn->prepare($sql);
-    $stmt->execute([$mecanico_id, $id]);
+    $stmt->execute([$id, $mecanico_id]);
     $servico = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$servico) {
@@ -59,23 +50,27 @@ try {
     $stmt->execute([$servico['id']]);
 
     // Atualizar a origem (notificação ou ficha)
-    if ($tipo === 'notificacao') {
+    if ($servico['notificacao_id']) {
         $stmt = $conn->prepare("UPDATE notificacoes SET status = 'em_andamento' WHERE id = ?");
-    } else {
+        $stmt->execute([$servico['notificacao_id']]);
+    } elseif ($servico['ficha_id']) {
         $stmt = $conn->prepare("UPDATE ficha_defeito SET status = 'em_andamento' WHERE id = ?");
+        $stmt->execute([$servico['ficha_id']]);
     }
-    $stmt->execute([$id]);
 
     $conn->commit();
 
     echo json_encode([
         'success' => true,
         'message' => 'Serviço iniciado com sucesso',
-        'service_id' => $servico['id']
+        'service_id' => $servico['id'],
+        'start_time' => date('Y-m-d H:i:s')
     ]);
 
 } catch (Exception $e) {
-    $conn->rollBack();
+    if ($conn->inTransaction()) {
+        $conn->rollBack();
+    }
     http_response_code($e->getCode() ?: 400);
     echo json_encode([
         'success' => false,
