@@ -10,23 +10,39 @@ $config = [
     'database' => 'workflow_system'
 ];
 
+// Modo de Debug
+define('DEBUG_MODE', true);
+
+function debug($message) {
+    if (DEBUG_MODE) {
+        error_log($message);
+    }
+}
+
 // Conexão com o banco de dados
 function conectarBD() {
     global $config;
-    
+
     try {
+        debug("Tentando conectar ao banco de dados {$config['database']} em {$config['host']}");
+
         $conn = new mysqli($config['host'], $config['username'], $config['password'], $config['database']);
-        $conn->set_charset("utf8mb4");
-        
+
         if ($conn->connect_error) {
-            throw new Exception("Falha na conexão: " . $conn->connect_error);
+            $errorMsg = "Falha na conexão: " . $conn->connect_error;
+            debug($errorMsg);
+            throw new Exception($errorMsg);
         }
-        
+
+        $conn->set_charset("utf8mb4");
+        debug("Conexão com o banco de dados estabelecida com sucesso");
+
         return $conn;
     } catch (Exception $e) {
         // Registra o erro em log
-        error_log($e->getMessage());
-        
+        $errorMsg = "Erro de conexão: " . $e->getMessage();
+        error_log($errorMsg);
+
         // Retorna false em caso de falha
         return false;
     }
@@ -42,40 +58,40 @@ function fecharConexao($conn) {
 // Função para executar consultas SQL com segurança
 function executarConsulta($sql, $params = [], $tipos = "") {
     $conn = conectarBD();
-    
+
     if (!$conn) {
         return ['erro' => 'Falha na conexão com o banco de dados'];
     }
-    
+
     try {
         $stmt = $conn->prepare($sql);
-        
+
         if (!$stmt) {
             throw new Exception("Erro ao preparar a consulta: " . $conn->error);
         }
-        
+
         // Bind de parâmetros se houver
         if (!empty($params) && !empty($tipos)) {
             $stmt->bind_param($tipos, ...$params);
         }
-        
+
         // Executa a consulta
         $stmt->execute();
-        
+
         // Verifica se a consulta foi bem-sucedida
         if ($stmt->error) {
             throw new Exception("Erro ao executar a consulta: " . $stmt->error);
         }
-        
+
         // Obtém o resultado se for uma consulta SELECT
         if (stripos($sql, 'SELECT') === 0) {
             $resultado = $stmt->get_result();
             $dados = [];
-            
+
             while ($row = $resultado->fetch_assoc()) {
                 $dados[] = $row;
             }
-            
+
             $stmt->close();
             fecharConexao($conn);
             return $dados;
@@ -83,10 +99,10 @@ function executarConsulta($sql, $params = [], $tipos = "") {
             // Para INSERT, UPDATE ou DELETE retorna o ID do último insert ou número de linhas afetadas
             $lastId = $conn->insert_id;
             $affectedRows = $stmt->affected_rows;
-            
+
             $stmt->close();
             fecharConexao($conn);
-            
+
             return [
                 'sucesso' => true,
                 'ultimo_id' => $lastId,
@@ -96,13 +112,54 @@ function executarConsulta($sql, $params = [], $tipos = "") {
     } catch (Exception $e) {
         // Registra o erro e retorna mensagem
         error_log($e->getMessage());
-        
+
         if (isset($stmt)) {
             $stmt->close();
         }
-        
+
         fecharConexao($conn);
-        
+
+        return ['erro' => $e->getMessage()];
+    }
+}
+
+// Adicione esta função para verificar a estrutura das tabelas
+function verificarEstruturaBanco() {
+    $conn = conectarBD();
+
+    if (!$conn) {
+        return ['erro' => 'Falha na conexão com o banco de dados'];
+    }
+
+    try {
+        // Verificar tabela veiculos
+        $result = $conn->query("DESCRIBE veiculos");
+        if (!$result) {
+            throw new Exception("Tabela 'veiculos' não encontrada ou inacessível");
+        }
+
+        $columns = [];
+        while ($row = $result->fetch_assoc()) {
+            $columns[] = $row['Field'] . ' (' . $row['Type'] . ')';
+        }
+        debug("Estrutura da tabela 'veiculos': " . implode(", ", $columns));
+
+        // Verificar tabela trocas_oleo
+        $result = $conn->query("DESCRIBE trocas_oleo");
+        if (!$result) {
+            throw new Exception("Tabela 'trocas_oleo' não encontrada ou inacessível");
+        }
+
+        $columns = [];
+        while ($row = $result->fetch_assoc()) {
+            $columns[] = $row['Field'] . ' (' . $row['Type'] . ')';
+        }
+        debug("Estrutura da tabela 'trocas_oleo': " . implode(", ", $columns));
+
+        fecharConexao($conn);
+        return ['sucesso' => true];
+    } catch (Exception $e) {
+        fecharConexao($conn);
         return ['erro' => $e->getMessage()];
     }
 }
@@ -120,7 +177,7 @@ function obterVeiculosComFiltro($busca = '', $status = '', $secretaria = '') {
     $sql = "SELECT * FROM veiculos WHERE 1=1";
     $params = [];
     $tipos = "";
-    
+
     if (!empty($busca)) {
         $sql .= " AND (veiculo LIKE ? OR placa LIKE ?)";
         $busca = "%$busca%";
@@ -128,31 +185,31 @@ function obterVeiculosComFiltro($busca = '', $status = '', $secretaria = '') {
         $params[] = $busca;
         $tipos .= "ss";
     }
-    
+
     if (!empty($secretaria)) {
         $sql .= " AND secretaria = ?";
         $params[] = $secretaria;
         $tipos .= "s";
     }
-    
+
     $sql .= " ORDER BY veiculo";
-    
+
     $veiculos = executarConsulta($sql, $params, $tipos);
-    
+
     // Filtrar por status se necessário (em dia, próxima, atrasada)
     if (!empty($status) && !empty($veiculos) && !isset($veiculos['erro'])) {
         $dataAtual = new DateTime();
         $veiculosFiltrados = [];
-        
+
         foreach ($veiculos as $veiculo) {
             if (empty($veiculo['proxima_troca_oleo'])) {
                 continue;
             }
-            
+
             $proximaTroca = new DateTime($veiculo['proxima_troca_oleo']);
             $diasRestantes = $dataAtual->diff($proximaTroca)->days;
             $passouTroca = $proximaTroca < $dataAtual;
-            
+
             if ($status === 'em_dia' && !$passouTroca && $diasRestantes > 15) {
                 $veiculosFiltrados[] = $veiculo;
             } elseif ($status === 'proxima' && !$passouTroca && $diasRestantes <= 15) {
@@ -161,10 +218,10 @@ function obterVeiculosComFiltro($busca = '', $status = '', $secretaria = '') {
                 $veiculosFiltrados[] = $veiculo;
             }
         }
-        
+
         return $veiculosFiltrados;
     }
-    
+
     return $veiculos;
 }
 
@@ -173,22 +230,22 @@ function obterVeiculo($id) {
     $sql = "SELECT * FROM veiculos WHERE id = ?";
     $params = [$id];
     $tipos = "i";
-    
+
     $resultados = executarConsulta($sql, $params, $tipos);
-    
+
     if (!empty($resultados) && !isset($resultados['erro'])) {
         return $resultados[0];
     }
-    
+
     return ['erro' => 'Veículo não encontrado'];
 }
 
 // Adicionar um novo veículo
 function adicionarVeiculo($dados) {
-    $sql = "INSERT INTO veiculos (veiculo, combustivel, matricula, placa, renavam, chassi, marca, 
-            ano_modelo, tipo, secretaria, status, tanque, proxima_troca_oleo, proximo_km_troca) 
+    $sql = "INSERT INTO veiculos (veiculo, combustivel, matricula, placa, renavam, chassi, marca,
+            ano_modelo, tipo, secretaria, status, tanque, proxima_troca_oleo, proximo_km_troca)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-    
+
     $params = [
         $dados['veiculo'],
         $dados['combustivel'],
@@ -205,28 +262,28 @@ function adicionarVeiculo($dados) {
         $dados['proxima_troca_oleo'] ?? null,
         $dados['proximo_km_troca'] ?? 0
     ];
-    
+
     $tipos = "sssssssssssis";
-    
+
     return executarConsulta($sql, $params, $tipos);
 }
 
 // Atualizar um veículo existente
 function atualizarVeiculo($id, $dados) {
-    $sql = "UPDATE veiculos SET 
-            veiculo = ?, 
-            combustivel = ?, 
-            matricula = ?, 
-            placa = ?, 
-            renavam = ?, 
-            chassi = ?, 
-            marca = ?, 
-            ano_modelo = ?, 
-            tipo = ?, 
-            secretaria = ?, 
-            status = ?, 
+    $sql = "UPDATE veiculos SET
+            veiculo = ?,
+            combustivel = ?,
+            matricula = ?,
+            placa = ?,
+            renavam = ?,
+            chassi = ?,
+            marca = ?,
+            ano_modelo = ?,
+            tipo = ?,
+            secretaria = ?,
+            status = ?,
             tanque = ?";
-    
+
     $params = [
         $dados['veiculo'],
         $dados['combustivel'],
@@ -241,26 +298,26 @@ function atualizarVeiculo($id, $dados) {
         $dados['status'],
         $dados['tanque']
     ];
-    
+
     $tipos = "ssssssssssi";
-    
+
     // Adicionar parâmetros opcionais se fornecidos
     if (isset($dados['proxima_troca_oleo'])) {
         $sql .= ", proxima_troca_oleo = ?";
         $params[] = $dados['proxima_troca_oleo'];
         $tipos .= "s";
     }
-    
+
     if (isset($dados['proximo_km_troca'])) {
         $sql .= ", proximo_km_troca = ?";
         $params[] = $dados['proximo_km_troca'];
         $tipos .= "i";
     }
-    
+
     $sql .= " WHERE id = ?";
     $params[] = $id;
     $tipos .= "i";
-    
+
     return executarConsulta($sql, $params, $tipos);
 }
 
@@ -269,7 +326,7 @@ function excluirVeiculo($id) {
     // Primeiro, exclui as trocas de óleo associadas
     $sqlTrocas = "DELETE FROM trocas_oleo WHERE veiculo_id = ?";
     executarConsulta($sqlTrocas, [$id], "i");
-    
+
     // Depois, exclui o veículo
     $sql = "DELETE FROM veiculos WHERE id = ?";
     return executarConsulta($sql, [$id], "i");
@@ -280,29 +337,29 @@ function atualizarKmTrocaOleo($id, $kmAtual, $ultimaTroca = null, $proximaTroca 
     $sql = "UPDATE veiculos SET km_atual = ?";
     $params = [$kmAtual];
     $tipos = "i";
-    
+
     if ($ultimaTroca !== null) {
         $sql .= ", ultima_troca = ?";
         $params[] = $ultimaTroca;
         $tipos .= "s";
     }
-    
+
     if ($proximaTroca !== null) {
         $sql .= ", proxima_troca_oleo = ?";
         $params[] = $proximaTroca;
         $tipos .= "s";
     }
-    
+
     if ($proximoKmTroca !== null) {
         $sql .= ", proximo_km_troca = ?";
         $params[] = $proximoKmTroca;
         $tipos .= "i";
     }
-    
+
     $sql .= " WHERE id = ?";
     $params[] = $id;
     $tipos .= "i";
-    
+
     return executarConsulta($sql, $params, $tipos);
 }
 
@@ -311,62 +368,93 @@ function atualizarKmTrocaOleo($id, $kmAtual, $ultimaTroca = null, $proximaTroca 
 // Registrar uma nova troca de óleo
 function registrarTrocaOleo($dados) {
     $conn = conectarBD();
-    
+
     if (!$conn) {
         return ['erro' => 'Falha na conexão com o banco de dados'];
     }
-    
+
     try {
         // Iniciar transação
         $conn->begin_transaction();
-        
+
+        // Verificar se a tabela tem a estrutura correta
+        $checkTable = $conn->query("SHOW COLUMNS FROM trocas_oleo");
+        $columns = [];
+        while ($col = $checkTable->fetch_assoc()) {
+            $columns[] = $col['Field'];
+        }
+
+        // Construir consulta dinâmica com base nas colunas existentes
+        $fields = [];
+        $placeholders = [];
+        $values = [];
+        $types = "";
+
+        // Mapeamento de dados para campos da tabela
+        $dataMapping = [
+            'veiculo_id' => ['value' => $dados['veiculo_id'], 'type' => 'i'],
+            'data_agendamento' => ['value' => $dados['data_agendamento'] ?? date('Y-m-d'), 'type' => 's'],
+            'data_realizacao' => ['value' => $dados['data_realizacao'], 'type' => 's'],
+            'realizado_por' => ['value' => $dados['realizado_por'] ?? null, 'type' => 'i'],
+            'km' => ['value' => $dados['km'], 'type' => 'i'],
+            'tipo_oleo' => ['value' => $dados['tipo_oleo'], 'type' => 's'],
+            'quantidade' => ['value' => $dados['quantidade'], 'type' => 's'],
+            'proxima_troca' => ['value' => $dados['proxima_troca'], 'type' => 's'],
+            'proximo_km' => ['value' => $dados['proximo_km'], 'type' => 'd'],
+            'observacoes' => ['value' => $dados['observacoes'] ?? null, 'type' => 's']
+        ];
+
+        // Verificar quais campos existem na tabela e adicioná-los à consulta
+        foreach ($dataMapping as $field => $data) {
+            if (in_array($field, $columns)) {
+                $fields[] = $field;
+                $placeholders[] = '?';
+                $values[] = $data['value'];
+                $types .= $data['type'];
+            }
+        }
+
+        if (empty($fields)) {
+            throw new Exception("Nenhum campo válido para inserção");
+        }
+
         // Inserir registro de troca
-        $sql = "INSERT INTO trocas_oleo (veiculo_id, data_agendamento, data_realizacao, realizado_por,
-                km, tipo_oleo, quantidade, proxima_troca, proximo_km, observacoes) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-        
+        $sql = "INSERT INTO trocas_oleo (" . implode(", ", $fields) . ") VALUES (" . implode(", ", $placeholders) . ")";
+
         $stmt = $conn->prepare($sql);
-        
+
         if (!$stmt) {
             throw new Exception("Erro ao preparar a consulta: " . $conn->error);
         }
-        
-        $stmt->bind_param("issiisssds",
-            $dados['veiculo_id'],
-            $dados['data_agendamento'] ?? date('Y-m-d'),
-            $dados['data_realizacao'],
-            $dados['realizado_por'] ?? null,
-            $dados['km'],
-            $dados['tipo_oleo'],
-            $dados['quantidade'],
-            $dados['proxima_troca'],
-            $dados['proximo_km'],
-            $dados['observacoes'] ?? null
-        );
-        
+
+        // Bind dinâmico de parâmetros
+        if (!empty($values)) {
+            $stmt->bind_param($types, ...$values);
+        }
+
         $stmt->execute();
-        
+
         if ($stmt->error) {
             throw new Exception("Erro ao registrar troca de óleo: " . $stmt->error);
         }
-        
+
         $insertId = $conn->insert_id;
-        
+
         // Atualizar informações do veículo
-        $sqlUpdateVeiculo = "UPDATE veiculos SET 
-                            ultima_troca = ?, 
-                            km_ultima_troca = ?, 
-                            km_atual = ?, 
-                            proxima_troca_oleo = ?, 
-                            proximo_km_troca = ? 
+        $sqlUpdateVeiculo = "UPDATE veiculos SET
+                            ultima_troca = ?,
+                            km_ultima_troca = ?,
+                            km_atual = ?,
+                            proxima_troca_oleo = ?,
+                            proximo_km_troca = ?
                             WHERE id = ?";
-        
+
         $stmtVeiculo = $conn->prepare($sqlUpdateVeiculo);
-        
+
         if (!$stmtVeiculo) {
             throw new Exception("Erro ao preparar a atualização do veículo: " . $conn->error);
         }
-        
+
         $stmtVeiculo->bind_param("siiisi",
             $dados['data_realizacao'],
             $dados['km'],
@@ -375,20 +463,20 @@ function registrarTrocaOleo($dados) {
             $dados['proximo_km'],
             $dados['veiculo_id']
         );
-        
+
         $stmtVeiculo->execute();
-        
+
         if ($stmtVeiculo->error) {
             throw new Exception("Erro ao atualizar veículo: " . $stmtVeiculo->error);
         }
-        
+
         // Commit da transação
         $conn->commit();
-        
+
         $stmt->close();
         $stmtVeiculo->close();
         fecharConexao($conn);
-        
+
         return [
             'sucesso' => true,
             'id' => $insertId
@@ -396,10 +484,10 @@ function registrarTrocaOleo($dados) {
     } catch (Exception $e) {
         // Rollback em caso de erro
         $conn->rollback();
-        
+
         // Log do erro
         error_log($e->getMessage());
-        
+
         fecharConexao($conn);
         return ['erro' => $e->getMessage()];
     }
@@ -407,38 +495,38 @@ function registrarTrocaOleo($dados) {
 
 // Obter histórico de trocas de óleo
 function obterHistoricoTrocas($filtros = []) {
-    $sql = "SELECT t.*, v.veiculo, v.placa 
-            FROM trocas_oleo t 
-            INNER JOIN veiculos v ON t.veiculo_id = v.id 
+    $sql = "SELECT t.*, v.veiculo, v.placa
+            FROM trocas_oleo t
+            INNER JOIN veiculos v ON t.veiculo_id = v.id
             WHERE 1=1";
-    
+
     $params = [];
     $tipos = "";
-    
+
     // Filtro por veículo
     if (!empty($filtros['veiculo_id'])) {
         $sql .= " AND t.veiculo_id = ?";
         $params[] = $filtros['veiculo_id'];
         $tipos .= "i";
     }
-    
+
     // Filtro por data inicial
     if (!empty($filtros['data_inicial'])) {
         $sql .= " AND t.data_realizacao >= ?";
         $params[] = $filtros['data_inicial'];
         $tipos .= "s";
     }
-    
+
     // Filtro por data final
     if (!empty($filtros['data_final'])) {
         $sql .= " AND t.data_realizacao <= ?";
         $params[] = $filtros['data_final'];
         $tipos .= "s";
     }
-    
+
     // Ordenação
     $sql .= " ORDER BY t.data_realizacao DESC";
-    
+
     return executarConsulta($sql, $params, $tipos);
 }
 
@@ -447,57 +535,57 @@ function obterProximasTrocas($dataInicial = null, $dataFinal = null) {
     if ($dataInicial === null) {
         $dataInicial = date('Y-m-d');
     }
-    
+
     if ($dataFinal === null) {
         $dataFinal = date('Y-m-d', strtotime('+3 months'));
     }
-    
-    $sql = "SELECT v.id, v.veiculo, v.placa, v.proxima_troca_oleo, v.secretaria 
-            FROM veiculos v 
+
+    $sql = "SELECT v.id, v.veiculo, v.placa, v.proxima_troca_oleo, v.secretaria
+            FROM veiculos v
             WHERE v.proxima_troca_oleo BETWEEN ? AND ?
             ORDER BY v.proxima_troca_oleo";
-    
+
     $params = [$dataInicial, $dataFinal];
     $tipos = "ss";
-    
+
     return executarConsulta($sql, $params, $tipos);
 }
 
 // Obter estatísticas para o dashboard
 function obterEstatisticas() {
     $conn = conectarBD();
-    
+
     if (!$conn) {
         return ['erro' => 'Falha na conexão com o banco de dados'];
     }
-    
+
     try {
         // Total de veículos
         $sqlTotal = "SELECT COUNT(*) as total FROM veiculos";
         $resultTotal = $conn->query($sqlTotal);
         $totalVeiculos = $resultTotal->fetch_assoc()['total'];
-        
+
         // Data atual
         $dataAtual = date('Y-m-d');
-        
+
         // Veículos com troca em dia (mais de 15 dias para vencer)
-        $sqlEmDia = "SELECT COUNT(*) as total FROM veiculos 
+        $sqlEmDia = "SELECT COUNT(*) as total FROM veiculos
                     WHERE proxima_troca_oleo > DATE_ADD('$dataAtual', INTERVAL 15 DAY)";
         $resultEmDia = $conn->query($sqlEmDia);
         $veiculosEmDia = $resultEmDia->fetch_assoc()['total'];
-        
+
         // Veículos com troca próxima (menos de 15 dias para vencer)
-        $sqlProxima = "SELECT COUNT(*) as total FROM veiculos 
+        $sqlProxima = "SELECT COUNT(*) as total FROM veiculos
                       WHERE proxima_troca_oleo BETWEEN '$dataAtual' AND DATE_ADD('$dataAtual', INTERVAL 15 DAY)";
         $resultProxima = $conn->query($sqlProxima);
         $veiculosProxima = $resultProxima->fetch_assoc()['total'];
-        
+
         // Veículos com troca atrasada
-        $sqlAtrasada = "SELECT COUNT(*) as total FROM veiculos 
+        $sqlAtrasada = "SELECT COUNT(*) as total FROM veiculos
                        WHERE proxima_troca_oleo < '$dataAtual'";
         $resultAtrasada = $conn->query($sqlAtrasada);
         $veiculosAtrasada = $resultAtrasada->fetch_assoc()['total'];
-        
+
         // Trocas realizadas por mês (últimos 5 meses)
         $sqlTrocasMes = "SELECT YEAR(data_realizacao) as ano, MONTH(data_realizacao) as mes,
                          COUNT(*) as total
@@ -507,7 +595,7 @@ function obterEstatisticas() {
                          ORDER BY YEAR(data_realizacao) DESC, MONTH(data_realizacao) DESC
                          LIMIT 5";
         $resultTrocasMes = $conn->query($sqlTrocasMes);
-        
+
         $trocasPorMes = [];
         while ($row = $resultTrocasMes->fetch_assoc()) {
             $nomeMes = obterNomeMes($row['mes']);
@@ -518,14 +606,14 @@ function obterEstatisticas() {
                 'total' => $row['total']
             ];
         }
-        
+
         // Veículos por tipo
-        $sqlTipos = "SELECT tipo, COUNT(*) as total 
-                    FROM veiculos 
+        $sqlTipos = "SELECT tipo, COUNT(*) as total
+                    FROM veiculos
                     GROUP BY tipo
                     ORDER BY total DESC";
         $resultTipos = $conn->query($sqlTipos);
-        
+
         $veiculosPorTipo = [];
         while ($row = $resultTipos->fetch_assoc()) {
             $veiculosPorTipo[] = [
@@ -533,9 +621,9 @@ function obterEstatisticas() {
                 'total' => $row['total']
             ];
         }
-        
+
         fecharConexao($conn);
-        
+
         return [
             'total_veiculos' => $totalVeiculos,
             'veiculos_em_dia' => $veiculosEmDia,
@@ -567,87 +655,101 @@ function obterNomeMes($mes) {
         11 => 'Novembro',
         12 => 'Dezembro'
     ];
-    
+
     return $meses[$mes] ?? '';
 }
 
 // Processar as requisições AJAX
 if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest') {
     header('Content-Type: application/json');
-    
+
     // Pegar a ação da requisição
     $acao = $_POST['acao'] ?? $_GET['acao'] ?? '';
-    
+
+    debug("Requisição AJAX recebida. Ação: $acao");
+
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        debug("Dados POST: " . print_r($_POST, true));
+    } else {
+        debug("Dados GET: " . print_r($_GET, true));
+    }
+
+    // Verificar a estrutura do banco se a ação for verificar_banco
+    if ($acao === 'verificar_banco') {
+        echo json_encode(verificarEstruturaBanco());
+        exit;
+    }
+
     switch ($acao) {
         case 'obter_veiculos':
             $busca = $_GET['busca'] ?? '';
             $status = $_GET['status'] ?? '';
             $secretaria = $_GET['secretaria'] ?? '';
-            
+
             $veiculos = obterVeiculosComFiltro($busca, $status, $secretaria);
             echo json_encode($veiculos);
             break;
-            
+
         case 'obter_veiculo':
             $id = $_GET['id'] ?? 0;
-            
+
             $veiculo = obterVeiculo($id);
             echo json_encode($veiculo);
             break;
-            
+
         case 'adicionar_veiculo':
             $resultado = adicionarVeiculo($_POST);
             echo json_encode($resultado);
             break;
-            
+
         case 'atualizar_veiculo':
             $id = $_POST['id'] ?? 0;
-            
+
             $resultado = atualizarVeiculo($id, $_POST);
             echo json_encode($resultado);
             break;
-            
+
         case 'excluir_veiculo':
             $id = $_POST['id'] ?? 0;
-            
+
             $resultado = excluirVeiculo($id);
             echo json_encode($resultado);
             break;
-            
+
         case 'registrar_troca_oleo':
             $resultado = registrarTrocaOleo($_POST);
             echo json_encode($resultado);
             break;
-            
+
         case 'obter_historico':
             $filtros = [
                 'veiculo_id' => $_GET['veiculo_id'] ?? null,
                 'data_inicial' => $_GET['data_inicial'] ?? null,
                 'data_final' => $_GET['data_final'] ?? null
             ];
-            
+
             $historico = obterHistoricoTrocas($filtros);
             echo json_encode($historico);
             break;
-            
+
         case 'obter_proximas_trocas':
             $dataInicial = $_GET['data_inicial'] ?? date('Y-m-d');
             $dataFinal = $_GET['data_final'] ?? date('Y-m-d', strtotime('+3 months'));
-            
+
             $trocas = obterProximasTrocas($dataInicial, $dataFinal);
             echo json_encode($trocas);
             break;
-            
+
         case 'obter_estatisticas':
             $estatisticas = obterEstatisticas();
             echo json_encode($estatisticas);
             break;
-            
+
         default:
             echo json_encode(['erro' => 'Ação inválida']);
             break;
     }
-    
+
     exit;
 }
 ?>
@@ -914,7 +1016,7 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
         .btn-info:hover {
             background: #16a085;
         }
-        
+
         .action-buttons {
             display: flex;
             gap: 10px;
@@ -1860,10 +1962,6 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                         <label>Marca/Modelo</label>
                         <div id="vehicle-brand" class="data-value">-</div>
                     </div>
-                    <div class="form-                    <div class="form-group">
-                        <label>Marca/Modelo</label>
-                        <div id="vehicle-brand" class="data-value">-</div>
-                    </div>
                     <div class="form-group">
                         <label>Ano/Modelo</label>
                         <div id="vehicle-year" class="data-value">-</div>
@@ -2087,15 +2185,15 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
         let itemsPerPage = 10;
         let currentHistoryPage = 1;
         let historyItemsPerPage = 10;
-        let calendarDate = new Date();
+        let calendarDate = new Date("2025-05-26");
         let oilChangeChart = null;
         let vehicleTypeChart = null;
-        
+
         // DOM Elements
         document.addEventListener('DOMContentLoaded', function() {
             // Initialize the application
             initApp();
-            
+
             // Event Listeners for tabs
             document.querySelectorAll('.tab-item').forEach(tab => {
                 tab.addEventListener('click', function() {
@@ -2103,26 +2201,26 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                     activateTab(tabId);
                 });
             });
-            
+
             // Event listener for search
             document.getElementById('search-vehicle').addEventListener('input', function() {
                 loadVehiclesTable(1, this.value);
             });
-            
+
             // Event listeners for filters
             document.getElementById('filter-status').addEventListener('change', function() {
                 loadVehiclesTable(1, document.getElementById('search-vehicle').value);
             });
-            
+
             document.getElementById('filter-secretaria').addEventListener('change', function() {
                 loadVehiclesTable(1, document.getElementById('search-vehicle').value);
             });
-            
+
             // Set default date for change-date
-            document.getElementById('change-date').valueAsDate = new Date();
-            
+            document.getElementById('change-date').valueAsDate = new Date("2025-05-26");
+
             // Calculate and set default next change date (3 months from now)
-            const nextChangeDate = new Date();
+            const nextChangeDate = new Date("2025-05-26");
             nextChangeDate.setMonth(nextChangeDate.getMonth() + 3);
             document.getElementById('next-change-date').valueAsDate = nextChangeDate;
         });
@@ -2130,37 +2228,37 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
         function initApp() {
             // Load dashboard stats
             loadDashboardStats();
-            
+
             // Load vehicles into the table
             loadVehiclesTable();
-            
+
             // Populate vehicle selection dropdowns
             populateVehicleDropdowns();
-            
+
             // Initialize charts
             initCharts();
-            
+
             // Initialize calendar
             renderCalendar();
-            
+
             // Check for overdue oil changes
             checkOverdueChanges();
         }
 
         function loadDashboardStats() {
-            fetch('sistema_troca_oleo.php?acao=obter_estatisticas')
+            fetch('painel_troca_oleo.php?acao=obter_estatisticas')
                 .then(response => response.json())
                 .then(data => {
                     if (data.erro) {
                         showToast('Erro ao carregar estatísticas: ' + data.erro, 'danger');
                         return;
                     }
-                    
+
                     document.getElementById('total-vehicles').textContent = data.total_veiculos;
                     document.getElementById('updated-vehicles').textContent = data.veiculos_em_dia;
                     document.getElementById('upcoming-vehicles').textContent = data.veiculos_proxima_troca;
                     document.getElementById('overdue-vehicles').textContent = data.veiculos_atrasados;
-                    
+
                     // Update charts
                     updateCharts(data);
                 })
@@ -2168,16 +2266,16 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                     showToast('Erro ao carregar estatísticas: ' + error, 'danger');
                 });
         }
-        
+
         function updateCharts(data) {
             // Update Oil Change Chart
             if (oilChangeChart) {
                 oilChangeChart.destroy();
             }
-            
+
             const oilChangeLabels = [];
             const oilChangeData = [];
-            
+
             // Process data for chart
             if (data.trocas_por_mes && data.trocas_por_mes.length > 0) {
                 data.trocas_por_mes.forEach(item => {
@@ -2185,7 +2283,7 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                     oilChangeData.unshift(parseInt(item.total));
                 });
             }
-            
+
             const oilChangeConfig = {
                 type: 'bar',
                 data: {
@@ -2217,14 +2315,14 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                     }
                 }
             };
-            
+
             oilChangeChart = new Chart(document.getElementById('oilChangeChart'), oilChangeConfig);
-            
+
             // Update Vehicle Type Chart
             if (vehicleTypeChart) {
                 vehicleTypeChart.destroy();
             }
-            
+
             const vehicleTypeLabels = [];
             const vehicleTypeData = [];
             const backgroundColors = [
@@ -2243,14 +2341,14 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                 'rgba(231, 76, 60, 1)',
                 'rgba(52, 73, 94, 1)'
             ];
-            
+
             if (data.veiculos_por_tipo && data.veiculos_por_tipo.length > 0) {
                 data.veiculos_por_tipo.forEach((item, index) => {
                     vehicleTypeLabels.push(item.tipo);
                     vehicleTypeData.push(parseInt(item.total));
                 });
             }
-            
+
             const vehicleTypeConfig = {
                 type: 'pie',
                 data: {
@@ -2277,7 +2375,7 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                     }
                 }
             };
-            
+
             vehicleTypeChart = new Chart(document.getElementById('vehicleTypeChart'), vehicleTypeConfig);
         }
 
@@ -2314,9 +2412,9 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                     }
                 }
             };
-            
+
             oilChangeChart = new Chart(document.getElementById('oilChangeChart'), oilChangeConfig);
-            
+
             const vehicleTypeConfig = {
                 type: 'pie',
                 data: {
@@ -2343,22 +2441,22 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                     }
                 }
             };
-            
+
             vehicleTypeChart = new Chart(document.getElementById('vehicleTypeChart'), vehicleTypeConfig);
         }
 
         function checkOverdueChanges() {
-            fetch('sistema_troca_oleo.php?acao=obter_estatisticas')
+            fetch('painel_troca_oleo.php?acao=obter_estatisticas')
                 .then(response => response.json())
                 .then(data => {
                     if (data.erro) return;
-                    
+
                     const overdueCount = parseInt(data.veiculos_atrasados) || 0;
                     const upcomingCount = parseInt(data.veiculos_proxima_troca) || 0;
                     const totalNotifications = overdueCount + upcomingCount;
-                    
+
                     document.getElementById('notification-count').textContent = totalNotifications;
-                    
+
                     if (totalNotifications > 0) {
                         if (overdueCount > 0) {
                             showToast(`${overdueCount} veículo${overdueCount > 1 ? 's' : ''} com troca de óleo atrasada!`, 'danger');
@@ -2374,55 +2472,55 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
         function loadVehiclesTable(page = 1, search = '') {
             const tableBody = document.querySelector('#vehicles-table tbody');
             tableBody.innerHTML = '<tr><td colspan="9" style="text-align:center;">Carregando...</td></tr>';
-            
+
             const statusFilter = document.getElementById('filter-status').value;
             const secretariaFilter = document.getElementById('filter-secretaria').value;
-            
-            let url = `sistema_troca_oleo.php?acao=obter_veiculos&page=${page}&limit=${itemsPerPage}`;
-            
+
+            let url = `painel_troca_oleo.php?acao=obter_veiculos&page=${page}&limit=${itemsPerPage}`;
+
             if (search) {
                 url += `&busca=${encodeURIComponent(search)}`;
             }
-            
+
             if (statusFilter) {
                 url += `&status=${encodeURIComponent(statusFilter)}`;
             }
-            
+
             if (secretariaFilter) {
                 url += `&secretaria=${encodeURIComponent(secretariaFilter)}`;
             }
-            
+
             fetch(url)
                 .then(response => response.json())
                 .then(data => {
                     tableBody.innerHTML = '';
-                    
+
                     if (data.erro) {
                         tableBody.innerHTML = `<tr><td colspan="9" style="text-align:center;">Erro: ${data.erro}</td></tr>`;
                         return;
                     }
-                    
+
                     if (data.length === 0) {
                         tableBody.innerHTML = '<tr><td colspan="9" style="text-align:center;">Nenhum veículo encontrado</td></tr>';
                         return;
                     }
-                    
+
                     currentPage = page;
-                    
+
                     // Add vehicle rows
                     data.forEach(vehicle => {
                         const row = document.createElement('tr');
-                        
+
                         // Determine status class
                         let statusClass;
                         let statusText;
-                        
-                        const currentDate = new Date();
+
+                        const currentDate = new Date("2025-05-26");
                         const nextChangeDate = vehicle.proxima_troca_oleo ? new Date(vehicle.proxima_troca_oleo) : null;
-                        
+
                         if (nextChangeDate) {
                             const daysUntilChange = Math.floor((nextChangeDate - currentDate) / (1000 * 60 * 60 * 24));
-                            
+
                             if (daysUntilChange < 0) {
                                 statusClass = 'status-overdue';
                                 statusText = 'Atrasada';
@@ -2437,11 +2535,11 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                             statusClass = 'status-due';
                             statusText = 'Não definida';
                         }
-                        
+
                         // Format dates for display
                         const lastChangeDate = vehicle.ultima_troca ? new Date(vehicle.ultima_troca).toLocaleDateString('pt-BR') : 'N/D';
                         const nextChangeDateFormatted = nextChangeDate ? nextChangeDate.toLocaleDateString('pt-BR') : 'N/D';
-                        
+
                         row.innerHTML = `
                             <td>${vehicle.veiculo || 'N/D'}</td>
                             <td>${vehicle.placa || 'N/D'}</td>
@@ -2465,10 +2563,10 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                                 </div>
                             </td>
                         `;
-                        
+
                         tableBody.appendChild(row);
                     });
-                    
+
                     // Update pagination
                     const totalCount = data.total_count || data.length;
                     const totalPages = Math.ceil(totalCount / itemsPerPage);
@@ -2483,11 +2581,11 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
         function updatePagination(totalPages, currentPage) {
             const pagination = document.getElementById('pagination');
             pagination.innerHTML = '';
-            
+
             if (totalPages <= 1) {
                 return;
             }
-            
+
             // Add previous button
             if (currentPage > 1) {
                 const prevItem = document.createElement('div');
@@ -2496,11 +2594,11 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                 prevItem.addEventListener('click', () => loadVehiclesTable(currentPage - 1, document.getElementById('search-vehicle').value));
                 pagination.appendChild(prevItem);
             }
-            
+
             // Add page numbers
             let startPage = Math.max(1, currentPage - 2);
             let endPage = Math.min(totalPages, currentPage + 2);
-            
+
             for (let i = startPage; i <= endPage; i++) {
                 const pageItem = document.createElement('div');
                 pageItem.className = 'pagination-item';
@@ -2511,7 +2609,7 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                 pageItem.addEventListener('click', () => loadVehiclesTable(i, document.getElementById('search-vehicle').value));
                 pagination.appendChild(pageItem);
             }
-            
+
             // Add next button
             if (currentPage < totalPages) {
                 const nextItem = document.createElement('div');
@@ -2523,34 +2621,34 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
         }
 
         function populateVehicleDropdowns() {
-            fetch('sistema_troca_oleo.php?acao=obter_veiculos')
+            fetch('painel_troca_oleo.php?acao=obter_veiculos')
                 .then(response => response.json())
                 .then(data => {
                     if (data.erro) {
                         showToast('Erro ao carregar veículos: ' + data.erro, 'danger');
                         return;
                     }
-                    
+
                     const vehicleSelect = document.getElementById('vehicle-select');
                     const historyVehicleSelect = document.getElementById('history-vehicle-select');
-                    
+
                     // Clear existing options (except first)
                     while (vehicleSelect.options.length > 1) {
                         vehicleSelect.remove(1);
                     }
-                    
+
                     while (historyVehicleSelect.options.length > 1) {
                         historyVehicleSelect.remove(1);
                     }
-                    
+
                     // Add vehicle options
                     data.forEach(vehicle => {
                         const option = document.createElement('option');
                         option.value = vehicle.id;
                         option.textContent = `${vehicle.veiculo} (${vehicle.placa})`;
-                        
+
                         const historyOption = option.cloneNode(true);
-                        
+
                         vehicleSelect.appendChild(option);
                         historyVehicleSelect.appendChild(historyOption);
                     });
@@ -2563,103 +2661,103 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
         function renderCalendar() {
             const year = calendarDate.getFullYear();
             const month = calendarDate.getMonth();
-            
+
             // Update calendar month display
-            const monthNames = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 
+            const monthNames = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
                                 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
             document.getElementById('calendar-month').textContent = `${monthNames[month]} ${year}`;
-            
+
             // Get the first day of the month
             const firstDay = new Date(year, month, 1);
             const lastDay = new Date(year, month + 1, 0);
-            
+
             // Get the day of the week of the first day (0 = Sunday, 6 = Saturday)
             const firstDayOfWeek = firstDay.getDay();
-            
+
             // Get the number of days in the month
             const daysInMonth = lastDay.getDate();
-            
+
             // Get the calendar grid container
             const calendarDays = document.getElementById('calendar-days');
             calendarDays.innerHTML = '';
-            
+
             // Add days from previous month
             const prevMonth = new Date(year, month, 0);
             const daysInPrevMonth = prevMonth.getDate();
-            
+
             for (let i = firstDayOfWeek - 1; i >= 0; i--) {
                 const dayElement = document.createElement('div');
                 dayElement.className = 'calendar-day other-month';
                 dayElement.innerHTML = `<div class="calendar-day-number">${daysInPrevMonth - i}</div>`;
                 calendarDays.appendChild(dayElement);
             }
-            
+
             // Format dates for API request
             const dataInicial = `${year}-${(month + 1).toString().padStart(2, '0')}-01`;
             const dataFinal = `${year}-${(month + 1).toString().padStart(2, '0')}-${daysInMonth.toString().padStart(2, '0')}`;
-            
+
             // Get events for this month
-            fetch(`sistema_troca_oleo.php?acao=obter_proximas_trocas&data_inicial=${dataInicial}&data_final=${dataFinal}`)
+            fetch(`painel_troca_oleo.php?acao=obter_proximas_trocas&data_inicial=${dataInicial}&data_final=${dataFinal}`)
                 .then(response => response.json())
                 .then(events => {
                     // Create event map by day
                     const eventsByDay = {};
-                    
+
                     if (!events.erro && events.length > 0) {
                         events.forEach(event => {
                             const eventDate = new Date(event.proxima_troca_oleo);
                             const eventDay = eventDate.getDate();
-                            
+
                             if (!eventsByDay[eventDay]) {
                                 eventsByDay[eventDay] = [];
                             }
-                            
+
                             eventsByDay[eventDay].push(event);
                         });
                     }
-                    
+
                     // Add days of current month with events
                     for (let i = 1; i <= daysInMonth; i++) {
                         const dayDate = new Date(year, month, i);
                         const dayElement = document.createElement('div');
                         dayElement.className = 'calendar-day';
-                        
+
                         // Check if it's today
-                        const today = new Date();
-                        if (dayDate.getDate() === today.getDate() && 
-                            dayDate.getMonth() === today.getMonth() && 
+                        const today = new Date("2025-05-26");
+                        if (dayDate.getDate() === today.getDate() &&
+                            dayDate.getMonth() === today.getMonth() &&
                             dayDate.getFullYear() === today.getFullYear()) {
                             dayElement.classList.add('today');
                         }
-                        
+
                         // Check if there are events on this date
                         if (eventsByDay[i] && eventsByDay[i].length > 0) {
                             dayElement.classList.add('has-event');
-                            
+
                             const events = eventsByDay[i];
-                            
+
                             if (events.length > 0) {
                                 const event = document.createElement('div');
                                 event.className = 'calendar-event';
                                 event.textContent = `${events.length} troca${events.length > 1 ? 's' : ''}`;
-                                
+
                                 // Add click event to show details
                                 dayElement.addEventListener('click', () => {
                                     showCalendarEventDetails(dayDate, events);
                                 });
-                                
+
                                 dayElement.appendChild(event);
                             }
                         }
-                        
+
                         dayElement.innerHTML = `<div class="calendar-day-number">${i}</div>` + dayElement.innerHTML;
                         calendarDays.appendChild(dayElement);
                     }
-                    
+
                     // Add days from next month
                     const totalDaysDisplayed = firstDayOfWeek + daysInMonth;
                     const daysFromNextMonth = 7 - (totalDaysDisplayed % 7);
-                    
+
                     if (daysFromNextMonth < 7) {
                         for (let i = 1; i <= daysFromNextMonth; i++) {
                             const dayElement = document.createElement('div');
@@ -2671,21 +2769,21 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                 })
                 .catch(error => {
                     console.error('Erro ao carregar eventos do calendário:', error);
-                    
+
                     // Add days without events if API fails
                     for (let i = 1; i <= daysInMonth; i++) {
                         const dayDate = new Date(year, month, i);
                         const dayElement = document.createElement('div');
                         dayElement.className = 'calendar-day';
-                        
+
                         // Check if it's today
-                        const today = new Date();
-                        if (dayDate.getDate() === today.getDate() && 
-                            dayDate.getMonth() === today.getMonth() && 
+                        const today = new Date("2025-05-26");
+                        if (dayDate.getDate() === today.getDate() &&
+                            dayDate.getMonth() === today.getMonth() &&
                             dayDate.getFullYear() === today.getFullYear()) {
                             dayElement.classList.add('today');
                         }
-                        
+
                         dayElement.innerHTML = `<div class="calendar-day-number">${i}</div>`;
                         calendarDays.appendChild(dayElement);
                     }
@@ -2706,34 +2804,34 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
             const modal = document.getElementById('calendar-event-modal');
             const title = document.getElementById('calendar-event-title');
             const list = document.getElementById('calendar-event-list');
-            
+
             // Format date
             const formattedDate = date.toLocaleDateString('pt-BR', {
                 day: '2-digit',
                 month: '2-digit',
                 year: 'numeric'
             });
-            
+
             title.textContent = `Trocas de Óleo - ${formattedDate}`;
-            
+
             // Clear list
             list.innerHTML = '';
-            
+
             // Add events
             events.forEach(event => {
                 const eventItem = document.createElement('div');
                 eventItem.className = 'card';
                 eventItem.style.marginBottom = '10px';
-                
+
                 eventItem.innerHTML = `
                     <h3>${event.veiculo} (${event.placa})</h3>
                     <p><strong>Secretaria:</strong> ${event.secretaria || 'N/D'}</p>
                     <button class="btn btn-primary" onclick="registerOilChangeFromCalendar(${event.id})">Registrar Troca</button>
                 `;
-                
+
                 list.appendChild(eventItem);
             });
-            
+
             // Show modal
             modal.classList.add('active');
         }
@@ -2745,13 +2843,13 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
         function registerOilChangeFromCalendar(vehicleId) {
             // Close calendar event modal
             closeCalendarEventModal();
-            
+
             // Switch to register tab
             activateTab('register');
-            
+
             // Select the vehicle
             document.getElementById('vehicle-select').value = vehicleId;
-            
+
             // Populate form with suggested values
             populateOilChangeForm(vehicleId);
         }
@@ -2760,14 +2858,14 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
             document.querySelectorAll('.tab-item').forEach(tab => {
                 tab.classList.remove('active');
             });
-            
+
             document.querySelectorAll('.tab-content').forEach(content => {
                 content.classList.remove('active');
             });
-            
+
             document.querySelector(`.tab-item[data-tab="${tabId}"]`).classList.add('active');
             document.getElementById(`${tabId}-tab`).classList.add('active');
-            
+
             // Additional actions for specific tabs
             if (tabId === 'history') {
                 loadHistoryTable();
@@ -2779,51 +2877,51 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
         function loadHistoryTable(page = 1) {
             const tableBody = document.querySelector('#history-table tbody');
             tableBody.innerHTML = '<tr><td colspan="8" style="text-align:center;">Carregando...</td></tr>';
-            
+
             // Filter by vehicle if selected
             const selectedVehicleId = document.getElementById('history-vehicle-select').value;
             const startDate = document.getElementById('history-start-date').value;
             const endDate = document.getElementById('history-end-date').value;
-            
-            let url = `sistema_troca_oleo.php?acao=obter_historico&page=${page}&limit=${historyItemsPerPage}`;
-            
+
+            let url = `painel_troca_oleo.php?acao=obter_historico&page=${page}&limit=${historyItemsPerPage}`;
+
             if (selectedVehicleId) {
                 url += `&veiculo_id=${selectedVehicleId}`;
             }
-            
+
             if (startDate) {
                 url += `&data_inicial=${startDate}`;
             }
-            
+
             if (endDate) {
                 url += `&data_final=${endDate}`;
             }
-            
+
             fetch(url)
                 .then(response => response.json())
                 .then(data => {
                     tableBody.innerHTML = '';
-                    
+
                     if (data.erro) {
                         tableBody.innerHTML = `<tr><td colspan="8" style="text-align:center;">Erro: ${data.erro}</td></tr>`;
                         return;
                     }
-                    
+
                     if (data.length === 0) {
                         tableBody.innerHTML = '<tr><td colspan="8" style="text-align:center;">Nenhum registro encontrado</td></tr>';
                         return;
                     }
-                    
+
                     currentHistoryPage = page;
-                    
+
                     // Add history rows
                     data.forEach(record => {
                         const row = document.createElement('tr');
-                        
+
                         // Format dates for display
                         const changeDate = record.data_realizacao ? new Date(record.data_realizacao).toLocaleDateString('pt-BR') : 'N/D';
                         const nextChangeDate = record.proxima_troca ? new Date(record.proxima_troca).toLocaleDateString('pt-BR') : 'N/D';
-                        
+
                         row.innerHTML = `
                             <td>${record.veiculo || 'N/D'}</td>
                             <td>${record.placa || 'N/D'}</td>
@@ -2834,10 +2932,10 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                             <td>${nextChangeDate}</td>
                             <td>${record.proximo_km ? record.proximo_km.toLocaleString('pt-BR') + ' km' : 'N/D'}</td>
                         `;
-                        
+
                         tableBody.appendChild(row);
                     });
-                    
+
                     // Update pagination
                     const totalCount = data.total_count || data.length;
                     const totalPages = Math.ceil(totalCount / historyItemsPerPage);
@@ -2852,11 +2950,11 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
         function updateHistoryPagination(totalPages, currentPage) {
             const pagination = document.getElementById('history-pagination');
             pagination.innerHTML = '';
-            
+
             if (totalPages <= 1) {
                 return;
             }
-            
+
             // Add previous button
             if (currentPage > 1) {
                 const prevItem = document.createElement('div');
@@ -2865,11 +2963,11 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                 prevItem.addEventListener('click', () => loadHistoryTable(currentPage - 1));
                 pagination.appendChild(prevItem);
             }
-            
+
             // Add page numbers
             let startPage = Math.max(1, currentPage - 2);
             let endPage = Math.min(totalPages, currentPage + 2);
-            
+
             for (let i = startPage; i <= endPage; i++) {
                 const pageItem = document.createElement('div');
                 pageItem.className = 'pagination-item';
@@ -2880,7 +2978,7 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                 pageItem.addEventListener('click', () => loadHistoryTable(i));
                 pagination.appendChild(pageItem);
             }
-            
+
             // Add next button
             if (currentPage < totalPages) {
                 const nextItem = document.createElement('div');
@@ -2896,16 +2994,16 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
         }
 
         function openVehicleDetails(vehicleId) {
-            fetch(`sistema_troca_oleo.php?acao=obter_veiculo&id=${vehicleId}`)
+            fetch(`painel_troca_oleo.php?acao=obter_veiculo&id=${vehicleId}`)
                 .then(response => response.json())
                 .then(vehicle => {
                     if (vehicle.erro) {
                         showToast('Erro ao carregar dados do veículo: ' + vehicle.erro, 'danger');
                         return;
                     }
-                    
+
                     currentVehicleId = vehicleId;
-                    
+
                     // Update vehicle details
                     document.getElementById('vehicle-details-title').textContent = `${vehicle.veiculo || 'N/D'} (${vehicle.placa || 'N/D'})`;
                     document.getElementById('vehicle-name').textContent = vehicle.veiculo || 'N/D';
@@ -2920,26 +3018,26 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                     document.getElementById('vehicle-fuel').textContent = vehicle.combustivel || 'N/D';
                     document.getElementById('vehicle-tank').textContent = vehicle.tanque ? `${vehicle.tanque} L` : 'N/D';
                     document.getElementById('vehicle-status').textContent = vehicle.status ? vehicle.status.charAt(0).toUpperCase() + vehicle.status.slice(1) : 'N/D';
-                    
+
                     // Oil change info
                     const lastChangeDate = vehicle.ultima_troca ? new Date(vehicle.ultima_troca).toLocaleDateString('pt-BR') : 'N/D';
                     const nextChangeDate = vehicle.proxima_troca_oleo ? new Date(vehicle.proxima_troca_oleo).toLocaleDateString('pt-BR') : 'N/D';
-                    
+
                     document.getElementById('last-change-date').textContent = lastChangeDate;
                     document.getElementById('last-change-km').textContent = vehicle.km_ultima_troca ? `${vehicle.km_ultima_troca.toLocaleString('pt-BR')} km` : 'N/D';
                     document.getElementById('next-change-date-display').textContent = nextChangeDate;
                     document.getElementById('next-change-km-display').textContent = vehicle.proximo_km_troca ? `${vehicle.proximo_km_troca.toLocaleString('pt-BR')} km` : 'N/D';
-                    
+
                     // Calculate oil status
                     if (vehicle.ultima_troca && vehicle.proxima_troca_oleo) {
-                        const currentDate = new Date();
+                        const currentDate = new Date("2025-05-26");
                         const lastChange = new Date(vehicle.ultima_troca);
                         const nextChange = new Date(vehicle.proxima_troca_oleo);
-                        
+
                         const totalDays = Math.floor((nextChange - lastChange) / (1000 * 60 * 60 * 24));
                         const daysUsed = Math.floor((currentDate - lastChange) / (1000 * 60 * 60 * 24));
                         const daysPercentage = Math.round((daysUsed / totalDays) * 100);
-                        
+
                         let kmPercentage = 0;
                         if (vehicle.km_ultima_troca !== null && vehicle.proximo_km_troca !== null && vehicle.km_atual !== null) {
                             const kmTotal = vehicle.proximo_km_troca - vehicle.km_ultima_troca;
@@ -2948,13 +3046,13 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                                 kmPercentage = Math.round((kmUsed / kmTotal) * 100);
                             }
                         }
-                        
+
                         // Use the higher percentage
                         const oilUsagePercentage = Math.max(daysPercentage, kmPercentage);
-                        
+
                         document.getElementById('oil-status').textContent = `${Math.min(100, oilUsagePercentage)}%`;
                         document.getElementById('oil-bar').style.width = `${Math.min(100, oilUsagePercentage)}%`;
-                        
+
                         // Oil bar color
                         if (oilUsagePercentage < 50) {
                             document.getElementById('oil-bar').style.background = 'linear-gradient(to right, #2ecc71, #27ae60)'; // Green
@@ -2967,13 +3065,13 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                         document.getElementById('oil-status').textContent = 'N/D';
                         document.getElementById('oil-bar').style.width = '0%';
                     }
-                    
+
                     // Load vehicle history
                     loadVehicleHistory(vehicleId);
-                    
+
                     // Show vehicle details container
                     document.getElementById('vehicle-details-container').style.display = 'block';
-                    
+
                     // Scroll to details
                     document.getElementById('vehicle-details-container').scrollIntoView({
                         behavior: 'smooth'
@@ -2987,33 +3085,33 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
         function loadVehicleHistory(vehicleId) {
             const tableBody = document.querySelector('#vehicle-history-table tbody');
             tableBody.innerHTML = '<tr><td colspan="7" style="text-align:center;">Carregando histórico...</td></tr>';
-            
-            fetch(`sistema_troca_oleo.php?acao=obter_historico&veiculo_id=${vehicleId}`)
+
+            fetch(`painel_troca_oleo.php?acao=obter_historico&veiculo_id=${vehicleId}`)
                 .then(response => response.json())
                 .then(data => {
                     tableBody.innerHTML = '';
-                    
+
                     if (data.erro) {
                         tableBody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Erro: ${data.erro}</td></tr>`;
                         return;
                     }
-                    
+
                     if (data.length === 0) {
                         tableBody.innerHTML = '<tr><td colspan="7" style="text-align:center;">Nenhum registro de troca encontrado</td></tr>';
                         return;
                     }
-                    
+
                     // Sort by date (newest first)
                     data.sort((a, b) => new Date(b.data_realizacao) - new Date(a.data_realizacao));
-                    
+
                     // Add history rows
                     data.forEach(record => {
                         const row = document.createElement('tr');
-                        
+
                         // Format dates for display
                         const changeDate = record.data_realizacao ? new Date(record.data_realizacao).toLocaleDateString('pt-BR') : 'N/D';
                         const nextChangeDate = record.proxima_troca ? new Date(record.proxima_troca).toLocaleDateString('pt-BR') : 'N/D';
-                        
+
                         row.innerHTML = `
                             <td>${changeDate}</td>
                             <td>${record.km ? record.km.toLocaleString('pt-BR') + ' km' : 'N/D'}</td>
@@ -3023,7 +3121,7 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                             <td>${record.proximo_km ? record.proximo_km.toLocaleString('pt-BR') + ' km' : 'N/D'}</td>
                             <td>${record.observacoes || '-'}</td>
                         `;
-                        
+
                         tableBody.appendChild(row);
                     });
                 })
@@ -3037,29 +3135,29 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
             // Reset form
             document.getElementById('vehicle-form').reset();
             document.getElementById('vehicle-form-id').value = '';
-            
+
             // Set title
             document.getElementById('vehicle-modal-title').textContent = 'Adicionar Veículo';
-            
+
             // Show modal
             document.getElementById('vehicle-modal').classList.add('active');
         }
 
         function editVehicleModal(vehicleId) {
-            fetch(`sistema_troca_oleo.php?acao=obter_veiculo&id=${vehicleId}`)
+            fetch(`painel_troca_oleo.php?acao=obter_veiculo&id=${vehicleId}`)
                 .then(response => response.json())
                 .then(vehicle => {
                     if (vehicle.erro) {
                         showToast('Erro ao carregar dados do veículo: ' + vehicle.erro, 'danger');
                         return;
                     }
-                    
+
                     // Set title
                     document.getElementById('vehicle-modal-title').textContent = 'Editar Veículo';
-                    
+
                     // Store vehicle ID in hidden field
                     document.getElementById('vehicle-form-id').value = vehicleId;
-                    
+
                     // Fill form fields
                     document.getElementById('vehicle-form-name').value = vehicle.veiculo || '';
                     document.getElementById('vehicle-form-plate').value = vehicle.placa || '';
@@ -3073,7 +3171,7 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                     document.getElementById('vehicle-form-fuel').value = vehicle.combustivel || '';
                     document.getElementById('vehicle-form-tank').value = vehicle.tanque || '';
                     document.getElementById('vehicle-form-status').value = vehicle.status || 'ativo';
-                    
+
                     // Show modal
                     document.getElementById('vehicle-modal').classList.add('active');
                 })
@@ -3090,7 +3188,7 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
             // Get form values
             const vehicleId = document.getElementById('vehicle-form-id').value;
             const formData = new FormData();
-            
+
             // Add form fields to FormData
             formData.append('veiculo', document.getElementById('vehicle-form-name').value);
             formData.append('placa', document.getElementById('vehicle-form-plate').value);
@@ -3104,30 +3202,30 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
             formData.append('combustivel', document.getElementById('vehicle-form-fuel').value);
             formData.append('tanque', document.getElementById('vehicle-form-tank').value);
             formData.append('status', document.getElementById('vehicle-form-status').value);
-            
+
             // Validate form
-            if (!formData.get('veiculo') || !formData.get('placa') || !formData.get('tipo') || 
-                !formData.get('secretaria') || !formData.get('marca') || !formData.get('ano_modelo') || 
+            if (!formData.get('veiculo') || !formData.get('placa') || !formData.get('tipo') ||
+                !formData.get('secretaria') || !formData.get('marca') || !formData.get('ano_modelo') ||
                 !formData.get('combustivel') || !formData.get('tanque')) {
                 showToast('Por favor, preencha todos os campos obrigatórios.', 'warning');
                 return;
             }
-            
+
             let url, method;
-            
+
             if (vehicleId) {
                 // Edit existing vehicle
-                url = 'sistema_troca_oleo.php';
+                url = 'painel_troca_oleo.php';
                 method = 'POST';
                 formData.append('acao', 'atualizar_veiculo');
                 formData.append('id', vehicleId);
             } else {
                 // Add new vehicle
-                url = 'sistema_troca_oleo.php';
+                url = 'painel_troca_oleo.php';
                 method = 'POST';
                 formData.append('acao', 'adicionar_veiculo');
             }
-            
+
             fetch(url, {
                 method: method,
                 body: formData
@@ -3138,21 +3236,21 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                     showToast('Erro: ' + result.erro, 'danger');
                     return;
                 }
-                
+
                 if (vehicleId) {
                     showToast('Veículo atualizado com sucesso!', 'success');
                 } else {
                     showToast('Veículo adicionado com sucesso!', 'success');
                 }
-                
+
                 // Close modal
                 closeVehicleModal();
-                
+
                 // Refresh data
                 loadDashboardStats();
                 loadVehiclesTable();
                 populateVehicleDropdowns();
-                
+
                 // If editing and details are open, refresh them
                 if (vehicleId && document.getElementById('vehicle-details-container').style.display === 'block') {
                     openVehicleDetails(vehicleId);
@@ -3168,7 +3266,7 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
             if (vehicleId !== null) {
                 currentVehicleId = vehicleId;
             }
-            
+
             // Show delete confirmation modal
             document.getElementById('delete-modal').classList.add('active');
         }
@@ -3182,29 +3280,29 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                 closeDeleteModal();
                 return;
             }
-            
+
             const formData = new FormData();
             formData.append('acao', 'excluir_veiculo');
             formData.append('id', currentVehicleId);
-            
-            fetch('sistema_troca_oleo.php', {
+
+            fetch('painel_troca_oleo.php', {
                 method: 'POST',
                 body: formData
             })
             .then(response => response.json())
             .then(result => {
                 closeDeleteModal();
-                
+
                 if (result.erro) {
                     showToast('Erro ao excluir veículo: ' + result.erro, 'danger');
                     return;
                 }
-                
+
                 showToast('Veículo excluído com sucesso!', 'success');
-                
+
                 // Hide vehicle details if shown
                 document.getElementById('vehicle-details-container').style.display = 'none';
-                
+
                 // Refresh data
                 loadDashboardStats();
                 loadVehiclesTable();
@@ -3217,38 +3315,38 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
         }
 
         function populateOilChangeForm(vehicleId) {
-            fetch(`sistema_troca_oleo.php?acao=obter_veiculo&id=${vehicleId}`)
+            fetch(`painel_troca_oleo.php?acao=obter_veiculo&id=${vehicleId}`)
                 .then(response => response.json())
                 .then(vehicle => {
                     if (vehicle.erro) {
                         showToast('Erro ao carregar dados do veículo: ' + vehicle.erro, 'danger');
                         return;
                     }
-                    
+
                     // Get the latest oil change for this vehicle
-                    fetch(`sistema_troca_oleo.php?acao=obter_historico&veiculo_id=${vehicleId}&limit=1`)
+                    fetch(`painel_troca_oleo.php?acao=obter_historico&veiculo_id=${vehicleId}&limit=1`)
                         .then(response => response.json())
                         .then(historico => {
                             // Set current km
                             document.getElementById('current-km').value = vehicle.km_atual || 0;
-                            
+
                             // Set suggested oil type and amount from last change
                             if (historico && historico.length > 0) {
                                 document.getElementById('oil-type').value = historico[0].tipo_oleo || '';
                                 document.getElementById('oil-amount').value = historico[0].quantidade || '';
                             }
-                            
+
                             // Set today's date
-                            document.getElementById('change-date').valueAsDate = new Date();
-                            
+                            document.getElementById('change-date').valueAsDate = new Date("2025-05-26");
+
                             // Calculate and set next change date (3 months from now)
-                            const nextChangeDate = new Date();
+                            const nextChangeDate = new Date("2025-05-26");
                             nextChangeDate.setMonth(nextChangeDate.getMonth() + 3);
                             document.getElementById('next-change-date').valueAsDate = nextChangeDate;
-                            
+
                             // Set next change km (current + 5000km or appropriate value based on vehicle type)
                             let kmIncrement = 5000; // Default
-                            
+
                             // Adjust based on vehicle type and fuel
                             if (vehicle.tipo && vehicle.combustivel) {
                                 if (vehicle.tipo === 'Caminhão' || vehicle.tipo === 'Ônibus') {
@@ -3259,7 +3357,7 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                                     kmIncrement = 3000;
                                 }
                             }
-                            
+
                             const currentKm = parseInt(document.getElementById('current-km').value) || 0;
                             document.getElementById('next-change-km').value = currentKm + kmIncrement;
                         })
@@ -3274,8 +3372,6 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
 
         function registerOilChange() {
             const vehicleId = parseInt(document.getElementById('vehicle-select').value);
-            const currentKm = parseInt(document.        function registerOilChange() {
-            const vehicleId = parseInt(document.getElementById('vehicle-select').value);
             const currentKm = parseInt(document.getElementById('current-km').value);
             const oilType = document.getElementById('oil-type').value;
             const oilAmount = parseFloat(document.getElementById('oil-amount').value);
@@ -3283,13 +3379,13 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
             const nextChangeKm = parseInt(document.getElementById('next-change-km').value);
             const nextChangeDate = document.getElementById('next-change-date').value;
             const observations = document.getElementById('observations').value;
-            
+
             // Validate form
             if (!vehicleId || !currentKm || !oilType || !oilAmount || !changeDate || !nextChangeKm || !nextChangeDate) {
                 showToast('Por favor, preencha todos os campos obrigatórios.', 'warning');
                 return;
             }
-            
+
             // Prepare form data
             const formData = new FormData();
             formData.append('acao', 'registrar_troca_oleo');
@@ -3301,9 +3397,9 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
             formData.append('proximo_km', nextChangeKm);
             formData.append('proxima_troca', nextChangeDate);
             formData.append('observacoes', observations);
-            formData.append('realizado_por', 'lipesl'); // Current user login
-            
-            fetch('sistema_troca_oleo.php', {
+            formData.append('realizado_por', 'lipeslt'); // Current user login
+
+            fetch('painel_troca_oleo.php', {
                 method: 'POST',
                 body: formData
             })
@@ -3313,18 +3409,18 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                     showToast('Erro ao registrar troca: ' + result.erro, 'danger');
                     return;
                 }
-                
+
                 showToast('Troca de óleo registrada com sucesso!', 'success');
-                
+
                 // Clear form
                 clearForm();
-                
+
                 // Refresh data
                 loadDashboardStats();
                 loadVehiclesTable();
-                
+
                 // If vehicle details are open, refresh them
-                if (document.getElementById('vehicle-details-container').style.display === 'block' && 
+                if (document.getElementById('vehicle-details-container').style.display === 'block' &&
                     currentVehicleId === vehicleId) {
                     openVehicleDetails(vehicleId);
                 }
@@ -3339,27 +3435,27 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
             document.getElementById('current-km').value = '';
             document.getElementById('oil-type').value = '';
             document.getElementById('oil-amount').value = '';
-            document.getElementById('change-date').valueAsDate = new Date('2025-05-26'); // Current date
+            document.getElementById('change-date').valueAsDate = new Date("2025-05-26");
             document.getElementById('next-change-km').value = '';
-            
-            const nextChangeDate = new Date('2025-05-26');
+
+            const nextChangeDate = new Date("2025-05-26");
             nextChangeDate.setMonth(nextChangeDate.getMonth() + 3);
             document.getElementById('next-change-date').valueAsDate = nextChangeDate;
-            
+
             document.getElementById('observations').value = '';
         }
 
         function showToast(message, type = 'primary') {
             const toastContainer = document.getElementById('toast-container');
-            
+
             const toast = document.createElement('div');
             toast.className = `toast toast-${type}`;
-            
+
             let icon = 'info-circle';
             if (type === 'success') icon = 'check-circle';
             if (type === 'warning') icon = 'exclamation-triangle';
             if (type === 'danger') icon = 'times-circle';
-            
+
             toast.innerHTML = `
                 <div class="toast-icon">
                     <i class="fas fa-${icon}"></i>
@@ -3371,18 +3467,18 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                     <i class="fas fa-times"></i>
                 </button>
             `;
-            
+
             toastContainer.appendChild(toast);
-            
+
             // Trigger animation
             setTimeout(() => {
                 toast.classList.add('active');
             }, 10);
-            
+
             // Auto remove after 5 seconds
             setTimeout(() => {
                 toast.classList.remove('active');
-                
+
                 setTimeout(() => {
                     toast.remove();
                 }, 300);
@@ -3406,6 +3502,21 @@ if (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQU
                 populateOilChangeForm(vehicleId);
             }
         });
+
+        function testarConexao() {
+            fetch('painel_troca_oleo.php?acao=verificar_banco')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.sucesso) {
+                        showToast('Conexão com o banco de dados OK!', 'success');
+                    } else {
+                        showToast('Erro na conexão: ' + data.erro, 'danger');
+                    }
+                })
+                .catch(error => {
+                    showToast('Erro ao verificar conexão: ' + error, 'danger');
+                });
+        }
     </script>
 </body>
 </html>
