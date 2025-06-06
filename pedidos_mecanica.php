@@ -1,1249 +1,1251 @@
 <?php
-session_start();
-include 'conexao.php'; 
+require 'db_connection.php'; // Inclui a conexão com o banco de dados
 
-if (!isset($_SESSION['user_name'])) {
+session_start();
+
+// Define o fuso horário para Cuiabá (UTC-4)
+date_default_timezone_set('America/Cuiaba');
+
+// Verifica se o usuário está logado
+if (empty($_SESSION['user_id'])) {
     header("Location: index.php");
     exit();
 }
 
-$user_name = $_SESSION['user_name'];
-$codigo_veiculo_param = isset($_GET['codigo']) ? intval($_GET['codigo']) : (isset($_SESSION['codigo_veiculo_sessao']) ? $_SESSION['codigo_veiculo_sessao'] : null);
-$veiculo_display_nome = "Veículo não encontrado"; 
+// --- Captura de Filtros e Ordenação ---
+$filtro_secretaria = isset($_GET['secretaria']) && $_GET['secretaria'] !== 'all' ? $_GET['secretaria'] : null;
+$ordem = isset($_GET['ordem']) && $_GET['ordem'] === 'ASC' ? 'ASC' : 'DESC';
 
-// Capture user role and determine form status
-$user_role = isset($_SESSION['role']) ? $_SESSION['role'] : 'user';
-$form_status = ($user_role === 'admin' || $user_role === 'geraladm') ? 'aceito' : 'pendente';
+// Definir o número de itens por página para a paginação
+$itens_por_pagina = 10;
+$pagina_atual = isset($_GET['pagina']) ? intval($_GET['pagina']) : 1;
+$offset = ($pagina_atual - 1) * $itens_por_pagina;
+$mecanico_id_session = $_SESSION['user_id']; // Store session user_id
 
-$km_inicial = 0;
-$secretaria = '';
-$veiculo_nome_identificador = ''; 
-$placa = '';
-$tipo_veiculo = '';
-$status_veiculo = '';
-$nome_ultimo_usuario = 'Nenhum registro encontrado';
+// Consultas para buscar dados do banco de dados
+try {
+    // --- Lógica de Filtro e Ordenação ---
+    $where_secretaria_ficha = $filtro_secretaria ? " AND f.secretaria = :secretaria_ficha " : "";
+    $where_secretaria_notif = $filtro_secretaria ? " AND n.secretaria = :secretaria_notif " : "";
+    
+    // Fichas de Defeito com status 'aceito' e não em processo por este mecânico
+    $queryFichas = "SELECT f.*, 'ficha' AS tipo_origem, u.name as submitter_name, u.cpf as submitter_cpf, u.secretaria as submitter_secretaria
+                    FROM ficha_defeito f 
+                    LEFT JOIN usuarios u ON f.user_id = u.id
+                    WHERE f.status = 'aceito' 
+                    AND NOT EXISTS (
+                        SELECT 1 
+                        FROM servicos_mecanica sm 
+                        WHERE sm.ficha_id = f.id 
+                        AND sm.mecanico_id = :mecanico_id_ficha
+                        AND sm.status IN ('aceito', 'em_andamento')
+                    )
+                    {$where_secretaria_ficha}
+                    ORDER BY f.data {$ordem}, f.hora {$ordem}";
+    $stmtFichas = $conn->prepare($queryFichas);
+    $stmtFichas->bindParam(':mecanico_id_ficha', $mecanico_id_session);
+    if ($filtro_secretaria) $stmtFichas->bindParam(':secretaria_ficha', $filtro_secretaria);
+    $stmtFichas->execute();
+    $fichas_aceitas = $stmtFichas->fetchAll(PDO::FETCH_ASSOC);
 
-// Buscar dados do usuário incluindo codigo_veiculo (ID do veículo) e secretaria
-$user_query_db = "SELECT id, codigo_veiculo, secretaria FROM usuarios WHERE name = :name LIMIT 1";
-$user_stmt_db = $conn->prepare($user_query_db);
-$user_stmt_db->bindParam(':name', $user_name, PDO::PARAM_STR);
-$user_stmt_db->execute();
-$user_data = $user_stmt_db->fetch(PDO::FETCH_ASSOC);
+    // Pedidos Aceitos dos serviços (servicos_mecanica)
+    // Para filtrar pedidos, a lógica precisa considerar a origem (ficha ou notificação)
+    $where_secretaria_pedidos = $filtro_secretaria ? " AND (f.secretaria = :secretaria_pedidos OR n.secretaria = :secretaria_pedidos)" : "";
+    $queryPedidos = "
+        SELECT 
+            sm.*, 
+            CASE 
+                WHEN sm.ficha_id IS NOT NULL THEN 'ficha'
+                WHEN sm.notificacao_id IS NOT NULL THEN 'notificacao'
+                ELSE 'pedido'
+            END AS tipo_origem,
+            n.mensagem as notificacao_mensagem, n.data as notificacao_data, n.prefixo as notificacao_prefixo, n.secretaria as notificacao_secretaria,
+            f.data as ficha_data, f.hora as ficha_hora, f.nome as ficha_nome, f.nome_veiculo as ficha_nome_veiculo,
+            f.veiculo_id as ficha_veiculo_id, f.secretaria as ficha_secretaria,
+            u_ficha.name as ficha_submitter_name, u_ficha.cpf as ficha_submitter_cpf, u_ficha.secretaria as ficha_submitter_secretaria,
+            u_notif.name as notif_submitter_name, u_notif.cpf as notif_submitter_cpf, u_notif.secretaria as notif_submitter_secretaria
+        FROM servicos_mecanica sm
+        LEFT JOIN notificacoes n ON sm.notificacao_id = n.id
+        LEFT JOIN ficha_defeito f ON sm.ficha_id = f.id
+        LEFT JOIN usuarios u_ficha ON f.user_id = u_ficha.id
+        LEFT JOIN usuarios u_notif ON n.user_id = u_notif.id
+        WHERE sm.mecanico_id = :mecanico_id 
+        AND sm.status IN ('aceito', 'em_andamento')
+        {$where_secretaria_pedidos}
+        ORDER BY sm.created_at {$ordem}";
+    $stmtPedidos = $conn->prepare($queryPedidos);
+    $stmtPedidos->bindParam(':mecanico_id', $mecanico_id_session);
+    if ($filtro_secretaria) $stmtPedidos->bindParam(':secretaria_pedidos', $filtro_secretaria);
+    $stmtPedidos->execute();
+    $pedidos_ativos = $stmtPedidos->fetchAll(PDO::FETCH_ASSOC);
 
-$user_id_sess = null;
-if ($user_data) {
-    $user_id_sess = $user_data['id']; // ID do usuário logado
-    $_SESSION['user_id'] = $user_id_sess; // Garante que user_id está na sessão para salvar_ficha.php
-    $secretaria = $user_data['secretaria'];
-    // Se o código do veículo não veio por GET, usa o associado ao usuário
-    if ($codigo_veiculo_param === null && isset($user_data['codigo_veiculo'])) {
-        $codigo_veiculo_param = $user_data['codigo_veiculo'];
-    }
+    // Notificações com status 'aceito' e não em processo por este mecânico
+    $queryNotificacoes = "SELECT n.*, 'notificacao' AS tipo_origem, u.name as submitter_name, u.cpf as submitter_cpf, u.secretaria as submitter_secretaria
+                          FROM notificacoes n
+                          LEFT JOIN usuarios u ON n.user_id = u.id
+                          WHERE n.status = 'aceito' 
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM servicos_mecanica sm
+                              WHERE sm.notificacao_id = n.id
+                              AND sm.mecanico_id = :mecanico_id_notif
+                              AND sm.status IN ('aceito', 'em_andamento')
+                          )
+                          {$where_secretaria_notif}
+                          ORDER BY n.data {$ordem}"; // CORREÇÃO: Usando n.data
+    $stmtNotificacoes = $conn->prepare($queryNotificacoes);
+    $stmtNotificacoes->bindParam(':mecanico_id_notif', $mecanico_id_session);
+    if ($filtro_secretaria) $stmtNotificacoes->bindParam(':secretaria_notif', $filtro_secretaria);
+    $stmtNotificacoes->execute();
+    $notificacoes_aceitas = $stmtNotificacoes->fetchAll(PDO::FETCH_ASSOC);
+
+    // Contar total de serviços finalizados para paginação
+    $join_finalizados_filtro = $filtro_secretaria ? "LEFT JOIN notificacoes n ON s.notificacao_id = n.id LEFT JOIN ficha_defeito f ON s.ficha_id = f.id" : "";
+    $where_finalizados_filtro = $filtro_secretaria ? "AND (f.secretaria = :secretaria OR n.secretaria = :secretaria)" : "";
+    
+    $queryContarFinalizados = "
+        SELECT COUNT(s.id) as total 
+        FROM servicos_mecanica s
+        {$join_finalizados_filtro}
+        WHERE s.mecanico_id = :mecanico_id AND s.status = 'finalizado'
+        {$where_finalizados_filtro}";
+    $stmtContarFinalizados = $conn->prepare($queryContarFinalizados);
+    $stmtContarFinalizados->bindParam(':mecanico_id', $mecanico_id_session);
+    if($filtro_secretaria) $stmtContarFinalizados->bindParam(':secretaria', $filtro_secretaria);
+    $stmtContarFinalizados->execute();
+    $total_servicos = $stmtContarFinalizados->fetch(PDO::FETCH_ASSOC)['total'];
+    
+    $total_paginas = ceil($total_servicos / $itens_por_pagina);
+
+    // Serviços Finalizados com paginação e ordenação
+    $queryFinalizados = "
+        SELECT 
+            s.*,
+            CASE 
+                WHEN s.ficha_id IS NOT NULL THEN 'ficha'
+                WHEN s.notificacao_id IS NOT NULL THEN 'notificacao'
+                ELSE 'pedido'
+            END AS tipo_origem,
+            n.*, n.mensagem as notificacao_mensagem, n.data as notificacao_data_finalizado,
+            f.*, f.data as ficha_data_finalizado, f.hora as ficha_hora_finalizado,
+            u_ficha.name as ficha_submitter_name, u_ficha.cpf as ficha_submitter_cpf, u_ficha.secretaria as ficha_submitter_secretaria,
+            u_notif.name as notif_submitter_name, u_notif.cpf as notif_submitter_cpf, u_notif.secretaria as notif_submitter_secretaria
+        FROM servicos_mecanica s
+        LEFT JOIN notificacoes n ON s.notificacao_id = n.id
+        LEFT JOIN ficha_defeito f ON s.ficha_id = f.id
+        LEFT JOIN usuarios u_ficha ON f.user_id = u_ficha.id
+        LEFT JOIN usuarios u_notif ON n.user_id = u_notif.id
+        WHERE s.mecanico_id = :mecanico_id AND s.status = 'finalizado'
+        {$where_finalizados_filtro}
+        ORDER BY s.data_conclusao {$ordem}
+        LIMIT :offset, :limite";
+    $stmtFinalizados = $conn->prepare($queryFinalizados);
+    $stmtFinalizados->bindParam(':mecanico_id', $mecanico_id_session);
+    $stmtFinalizados->bindParam(':offset', $offset, PDO::PARAM_INT);
+    $stmtFinalizados->bindParam(':limite', $itens_por_pagina, PDO::PARAM_INT);
+    if($filtro_secretaria) $stmtFinalizados->bindParam(':secretaria', $filtro_secretaria);
+    $stmtFinalizados->execute();
+    $servicos_finalizados = $stmtFinalizados->fetchAll(PDO::FETCH_ASSOC);
+
+    // Dados do usuário
+    $queryUser = "SELECT * FROM usuarios WHERE id = :id";
+    $stmtUser = $conn->prepare($queryUser);
+    $stmtUser->bindParam(':id', $mecanico_id_session);
+    $stmtUser->execute();
+    $user = $stmtUser->fetch(PDO::FETCH_ASSOC);
+    
+    // Lista de Secretarias para o filtro
+    $querySecretarias = "(SELECT DISTINCT secretaria FROM ficha_defeito WHERE secretaria IS NOT NULL AND secretaria != '')
+                         UNION
+                         (SELECT DISTINCT secretaria FROM notificacoes WHERE secretaria IS NOT NULL AND secretaria != '')
+                         ORDER BY secretaria ASC";
+    $stmtSecretarias = $conn->prepare($querySecretarias);
+    $stmtSecretarias->execute();
+    $lista_secretarias = $stmtSecretarias->fetchAll(PDO::FETCH_COLUMN);
+
+
+    $userName = $user['name'] ?? 'Usuário';
+    $profilePhoto = $user['profile_photo'] ?? 'https://placehold.co/40x40';
+} catch (PDOException $e) {
+    echo "Erro ao buscar dados: " . $e->getMessage();
+    exit();
 }
-
-// Se temos um código de veículo (ID numérico do veículo na tabela veiculos)
-if ($codigo_veiculo_param) {
-    $_SESSION['codigo_veiculo_sessao'] = $codigo_veiculo_param; // Salva na sessão para persistência
-
-    // Busca dados do veículo usando o ID (codigo_veiculo_param)
-    $query_veiculo_db = "SELECT veiculo, tipo, placa, status FROM veiculos WHERE id = :codigo_id";
-    $stmt_veiculo_db = $conn->prepare($query_veiculo_db);
-    $stmt_veiculo_db->bindParam(':codigo_id', $codigo_veiculo_param, PDO::PARAM_INT);
-    $stmt_veiculo_db->execute();
-    $veiculo_info = $stmt_veiculo_db->fetch(PDO::FETCH_ASSOC);
-
-    if ($veiculo_info) {
-        $veiculo_nome_identificador = $veiculo_info['veiculo'];
-        $tipo_veiculo   = $veiculo_info['tipo'];
-        $placa          = $veiculo_info['placa'];
-        $status_veiculo = $veiculo_info['status'];
-        $veiculo_display_nome = htmlspecialchars($veiculo_nome_identificador);
-
-
-        // Busca o último KM final para este veículo
-        try {
-            $sql_km = "SELECT km_final FROM registros WHERE veiculo_id = :veiculo_nome_id ORDER BY data DESC, hora DESC, id DESC LIMIT 1";
-            $stmt_km = $conn->prepare($sql_km);
-            $stmt_km->bindParam(':veiculo_nome_id', $veiculo_nome_identificador, PDO::PARAM_STR);
-            $stmt_km->execute();
-            $linha_km = $stmt_km->fetch(PDO::FETCH_ASSOC);
-            $km_inicial = $linha_km ? $linha_km['km_final'] : 0;
-        } catch (PDOException $e) {
-            $_SESSION['erro_km'] = 'Erro ao buscar último Km/h: ' . $e->getMessage();
-        }
-
-        // Busca o último usuário do veículo
-        $query_ultimo_usuario_db = "SELECT nome FROM registros
-                                    WHERE veiculo_id = :veiculo_nome_id
-                                    ORDER BY data DESC, hora DESC, id DESC
-                                    LIMIT 1";
-        $stmt_ultimo_usuario_db = $conn->prepare($query_ultimo_usuario_db);
-        $stmt_ultimo_usuario_db->bindValue(':veiculo_nome_id', $veiculo_nome_identificador, PDO::PARAM_STR);
-        $stmt_ultimo_usuario_db->execute();
-        $ultimo_registro = $stmt_ultimo_usuario_db->fetch(PDO::FETCH_ASSOC);
-        $nome_ultimo_usuario = $ultimo_registro ? $ultimo_registro['nome'] : 'Nenhum registro encontrado';
-
-        // Query para obter o último checklist registrado para o veículo
-        $checklist_query_db = "
-            SELECT * FROM checklist
-            WHERE prefixo = :prefixo_veiculo
-            ORDER BY created_at DESC
-            LIMIT 1
-        ";
-        $checklist_stmt_db = $conn->prepare($checklist_query_db);
-        $checklist_stmt_db->bindParam(':prefixo_veiculo', $veiculo_nome_identificador, PDO::PARAM_STR);
-        $checklist_stmt_db->execute();
-        $ultimo_checklist = $checklist_stmt_db->fetch(PDO::FETCH_ASSOC);
-
-    } else {
-        $_SESSION['erro_veiculo'] = 'Erro: Veículo com ID ' . $codigo_veiculo_param . ' não encontrado.';
-    }
-} else {
-     $_SESSION['info_veiculo'] = 'Nenhum veículo selecionado ou associado ao usuário.';
-}
-
 ?>
-
 <!DOCTYPE html>
 <html lang="pt">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ficha de Comunicação de Defeitos</title>
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    fontFamily: {
-                        'sans': ['Poppins', 'system-ui', 'sans-serif'],
-                    },
-                    colors: {
-                        'primary': '#3B82F6',
-                        'primary-dark': '#2563EB',
-                        'secondary': '#F97316',
-                        'accent': '#10B981',
-                        'success': '#10B981',
-                        'warning': '#F59E0B',
-                        'danger': '#EF4444',
-                        'gray-50': '#F9FAFB',
-                        'gray-100': '#F3F4F6', 
-                        'gray-200': '#E5E7EB',
-                        'gray-300': '#D1D5DB',
-                        'gray-800': '#1F2937',
-                        'amber-600': '#D97706'
-                    },
-                    boxShadow: {
-                        'soft': '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)',
-                        'hard': '0 10px 15px -3px rgba(59, 130, 246, 0.3), 0 4px 6px -2px rgba(59, 130, 246, 0.1)'
-                    },
-                    animation: {
-                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-                    },
-                }
-            }
-        }
-    </script>
-    <style>
-        * {
-            -webkit-tap-highlight-color: transparent;
-            scroll-behavior: smooth;
-        }
-        html, body {
-            height: 100%;
-            margin: 0;
-            padding: 0;
-            font-family: 'Poppins', sans-serif;
-            background-color: #F1F5F9;
-            color: #1F2937;
-        }
-        .app-container {
-            width: 100%;
-            max-width: 1024px; 
-            min-height: 100vh;
-            margin: 0 auto;
-            background: #F1F5F9;
-            position: relative;
-        }
-        @media (max-width: 1024px) {
-            .app-container {
-                max-width: 100%;
-                box-shadow: none;
-            }
-        }
-        
-        .content-body {
-            background: white;
-            padding-bottom: 2rem;
-        }
-        @media (min-width: 768px) {
-            .content-body {
-                border-radius: 1.5rem;
-                margin: -2.5rem 1.5rem 2rem 1.5rem;
-                box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-            }
-        }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Pedidos Mecânica</title>
 
-        .input-field {
-            transition: all 0.3s ease;
-            position: relative;
+  <script src="https://cdn.tailwindcss.com?plugins=forms,typography,aspect-ratio,line-clamp"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            'primary': '#4F46E5',
+            'secondary': '#F59E0B',
+            'accent': '#10B981',
+            'danger': '#EF4444'
+          },
+          boxShadow: {
+            'soft': '0 4px 24px -6px rgba(0, 0, 0, 0.1)',
+            'hard': '0 8px 24px -6px rgba(79, 70, 229, 0.3)'
+          }
         }
-        .input-field:focus-within {
-            border-color: #3B82F6;
-            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
-            transform: translateY(-1px);
-        }
-        .btn-primary {
-            background-color: #3B82F6;
-            transition: all 0.3s ease;
-        }
-        .btn-primary:hover {
-            background-color: #2563EB;
-            transform: translateY(-1px);
-            box-shadow: 0 6px 12px rgba(59, 130, 246, 0.25);
-        }
-        .btn-primary:active {
-            transform: translateY(0);
-        }
-        /* ALTERAÇÃO: Removido o border-radius do header para ocupar a tela toda */
-        .header-gradient {
-            background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
-            position: relative;
-            overflow: hidden;
-            padding: 0 1rem; /* Adiciona padding lateral para o conteúdo não colar nas bordas em telas pequenas */
-        }
-        .header-gradient:before {
-            content: '';
-            position: absolute;
-            top: -50%;
-            left: -50%;
-            width: 200%;
-            height: 200%;
-            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 60%);
-            animation: rotate 15s linear infinite;
-        }
-        @keyframes rotate {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
+      }
+    };
+  </script>
 
-        .forms-container {
-            overflow-y: auto;
-            -webkit-overflow-scrolling: touch;
-        }
-        .forms-container::-webkit-scrollbar {
-            width: 8px;
-        }
-        .forms-container::-webkit-scrollbar-track {
-            background: #F9FAFB;
-        }
-        .forms-container::-webkit-scrollbar-thumb {
-            background-color: #D1D5DB;
-            border-radius: 20px;
-        }
-        .forms-container::-webkit-scrollbar-thumb:hover {
-            background-color: #9CA3AF;
-        }
-        
-        .nav-button {
-            width: 2.75rem;
-            height: 2.75rem;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 3px 10px rgba(0, 0, 0, 0.1);
-            transition: all 0.3s ease;
-            backdrop-filter: blur(5px);
-            background-color: rgba(255, 255, 255, 0.9);
-        }
-        .nav-button:hover {
-            transform: scale(1.05) translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.15);
-        }
-        .nav-button:active {
-            transform: scale(0.98);
-        }
-        
-        .select-option-0 { 
-            background-color: rgba(16, 185, 129, 0.05) !important; 
-            border-color: rgba(16, 185, 129, 0.2) !important;
-        }
-        .select-option-selected { 
-            background-color: rgba(239, 68, 68, 0.05) !important; 
-            border-color: rgba(239, 68, 68, 0.3) !important;
-        }
-        .observation-field {
-            margin-top: 0.5rem;
-            border-radius: 0.75rem;
-            padding: 0.75rem 1rem;
-            border: 1px solid #e5e7eb;
-            background-color: #f9fafb;
-            width: 100%;
-            font-size: 0.875rem;
-            transition: all 0.3s ease;
-            max-height: 100px;
-            min-height: 60px;
-        }
-        .observation-field:focus {
-            border-color: #3B82F6;
-            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
-            outline: none;
-        }
-        .input-icon {
-            position: absolute;
-            left: 0.875rem;
-            top: 50%;
-            transform: translateY(-50%);
-            font-size: 1rem;
-            width: 1.25rem;
-            text-align: center;
-            color: #6B7280;
-            transition: all 0.3s ease;
-        }
-        .input-field:focus-within .input-icon,
-        .input-field.select-option-0 .input-icon i {
-            color: #10B981;
-        }
-        .input-field.select-option-selected .input-icon i {
-             color: #EF4444;
-        }
-        select {
-            -webkit-appearance: none;
-            -moz-appearance: none;
-            appearance: none;
-            padding-right: 2rem !important;
-            padding-left: 2.5rem !important;
-            cursor: pointer;
-            width: 100%;
-            background: transparent;
-            border: none;
-            outline: none;
-        }
-        .select-chevron {
-            pointer-events: none;
-            transition: all 0.3s ease;
-        }
-        select:focus + .select-chevron {
-            color: #3B82F6;
-            transform: translateY(-50%) rotate(180deg);
-        }
-        .input-uniform-width {
-            width: 100%;
-        }
-        
-        .form-section {
-            background: white;
-            border-radius: 16px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-            margin-bottom: 1.5rem;
-            padding: 1.25rem;
-            transition: all 0.3s ease;
-            opacity: 0;
-            transform: translateY(10px);
-            animation: fadeInUp 0.5s forwards;
-        }
-        .form-section-title {
-            font-weight: 600;
-            font-size: 1.125rem;
-            margin-bottom: 1.25rem;
-            display: flex;
-            align-items: center;
-            color: #1F2937;
-        }
-        .form-section-icon {
-            margin-right: 0.75rem;
-            color: #3B82F6;
-            font-size: 1.25rem;
-        }
-        
-        .modal-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: rgba(0, 0, 0, 0.5);
-            backdrop-filter: blur(4px);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 1000;
-            padding: 20px;
-            animation: fadeIn 0.3s ease;
-        }
-        .modal-container {
-            background-color: white;
-            border-radius: 16px;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
-            max-width: 500px;
-            width: 100%;
-            animation: slideUp 0.4s ease-out;
-            overflow: hidden;
-        }
-        .modal-header {
-            background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
-            color: white;
-            padding: 1.5rem;
-            text-align: center;
-        }
-        .modal-body {
-            padding: 2rem;
-            text-align: center;
-        }
-        .modal-footer {
-            display: flex;
-            justify-content: center;
-            padding: 1.5rem;
-            background-color: #f9fafb;
-            gap: 1rem;
-        }
-        .modal-icon {
-            font-size: 3.5rem;
-            margin-bottom: 1.5rem;
-        }
-        .modal-icon.success { color: #10B981; }
-        .modal-icon.error { color: #EF4444; }
-        .modal-icon.warning { color: #F59E0B; }
-        
-        .modal-title {
-            font-size: 1.5rem;
-            font-weight: 600;
-            margin-bottom: 0.75rem;
-        }
-        .modal-message {
-            font-size: 1rem;
-            color: #4B5563;
-            line-height: 1.5;
-        }
-        .modal-button {
-            padding: 0.75rem 1.5rem;
-            border-radius: 10px;
-            font-weight: 500;
-            transition: all 0.3s ease;
-            cursor: pointer;
-            min-width: 140px;
-        }
-        .modal-button-primary {
-            background-color: #3B82F6;
-            color: white;
-        }
-        .modal-button-primary:hover {
-            background-color: #2563EB;
-            transform: translateY(-2px);
-        }
-        .modal-button-secondary {
-            background-color: white;
-            color: #3B82F6;
-            border: 1px solid #E5E7EB;
-        }
-        .modal-button-secondary:hover {
-            background-color: #F3F4F6;
-        }
-        
-        @keyframes fadeInUp {
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-        @keyframes fadeIn {
-            to { opacity: 1; }
-        }
-        @keyframes slideUp {
-            from {
-                opacity: 0;
-                transform: translateY(30px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-        
-        .form-section:nth-child(1) { animation-delay: 0.1s; }
-        .form-section:nth-child(2) { animation-delay: 0.2s; }
-        .form-section:nth-child(3) { animation-delay: 0.3s; }
-        .form-section:nth-child(4) { animation-delay: 0.4s; }
-        
-        .status-badge {
-            display: inline-flex;
-            align-items: center;
-            padding: 0.25rem 0.75rem;
-            border-radius: 9999px;
-            font-size: 0.75rem;
-            font-weight: 500;
-        }
-        .status-badge-success {
-            background-color: rgba(16, 185, 129, 0.1);
-            color: #10B981;
-        }
-        .status-badge-warning {
-            background-color: rgba(245, 158, 11, 0.1);
-            color: #F59E0B;
-        }
-        .status-badge-danger {
-            background-color: rgba(239, 68, 68, 0.1);
-            color: #EF4444;
-        }
-        
-        .search-container {
-            position: relative;
-        }
-        .search-input {
-            width: 100%;
-            padding: 0.75rem 1rem 0.75rem 2.5rem;
-            border-radius: 0.75rem;
-            border: 1px solid #E5E7EB;
-        }
-        .search-input:focus {
-            outline: none;
-            border-color: #3B82F6;
-            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
-        }
-        .search-icon {
-            position: absolute;
-            left: 0.875rem;
-            top: 50%; 
-            transform: translateY(-50%);
-            color: #9CA3AF;
-        }
-        
-        .progress-container {
-            width: 100%;
-            height: 6px;
-            background-color: rgba(255, 255, 255, 0.2);
-            border-radius: 3px;
-            overflow: hidden;
-        }
-        .progress-bar {
-            height: 100%;
-            background: white;
-            border-radius: 3px;
-            transition: width 0.5s ease;
-        }
-        
-        .header-content {
-            padding-top: 2.5rem;
-            padding-bottom: 5rem;
-            text-align: center;
-        }
-        .header-icon {
-            margin-bottom: 0.75rem;
-        }
-        .header-title {
-            font-size: 1.25rem;
-            font-weight: 700;
-            color: white;
-        }
-        .header-subtitle {
-            font-size: 0.875rem;
-            color: rgba(255, 255, 255, 0.75);
-        }
-        
-        @media (max-width: 480px) {
-            .modal-footer {
-                flex-direction: column;
-            }
-            .modal-button {
-                width: 100%;
-            }
-        }
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.min.css">
+  <script defer src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script defer src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script defer src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
-        .notification-toast {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            padding: 1rem 1.5rem;
-            border-radius: 8px;
-            color: white;
-            font-size: 0.9rem;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-            z-index: 2000;
-            display: flex;
-            align-items: center;
-            opacity: 0;
-            transform: translateY(-20px);
-            transition: opacity 0.3s ease, transform 0.3s ease;
-        }
-        .notification-toast.show {
-            opacity: 1;
-            transform: translateY(0);
-        }
-        .notification-toast.success { background-color: #10B981; }
-        .notification-toast.error { background-color: #EF4444; }
-        .notification-toast.info { background-color: #3B82F6; }
-        .notification-toast i { margin-right: 0.75rem; font-size: 1.2rem; }
-    </style>
+  <style>
+    * {
+      -webkit-tap-highlight-color: transparent;
+    }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      margin: 0;
+      overflow-x: hidden;
+    }
+    .app-container {
+      width: 100%;
+      min-height: 100vh;
+      background: #f8f9fa;
+    }
+    .profile-ring {
+      box-shadow: 0 0 0 3px white, 0 0 0 6px #4F46E5;
+    }
+    .pedido-card {
+      transition: all 0.3s ease;
+    }
+    .pedido-card:hover {
+      transform: translateY(-2px);
+    }
+    .badge-pendente { background-color: #F59E0B; color: white; }
+    .badge-aceito { background-color: #10B981;  color: white; }
+    .badge-em-processo { background-color: #60A5FA; color: white; }
+    .badge-em-andamento { background-color: #3B82F6; color: white; }
+    .badge-concluido { background-color: #4F46E5; color: white; }
+    .badge-alta { background-color: #EF4444; color: white; }
+    .badge-media { background-color: #F59E0B; color: white; }
+    .badge-baixa { background-color: #10B981; color: white; }
+    .badge-notificacao { background-color: #3B82F6; color: white; }
+    .badge-ficha { background-color: #8B5CF6; color: white; }
+    .badge-pedido { background-color: #4F46E5; color: white; }
+    .timer-container {
+      background-color: #f0f9ff;
+      border: 1px solid #bae6fd;
+      border-radius: 0.5rem;
+      padding: 0.75rem;
+      margin-top: 0.75rem;
+    }
+    .timer-display {
+      font-family: monospace;
+      font-size: 1.5rem;
+      font-weight: bold;
+      color: #0284c7;
+      text-align: center;
+      margin-bottom: 0.75rem;
+    }
+    .pagination {
+      display: flex;
+      justify-content: center;
+      gap: 0.5rem;
+      margin-top: 2rem;
+      margin-bottom: 2rem;
+    }
+    .pagination-item {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.5rem;
+      height: 2.5rem;
+      border-radius: 0.5rem;
+      background-color: white;
+      color: #4F46E5;
+      border: 1px solid #e5e7eb;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .pagination-item:hover { background-color: #f3f4f6; }
+    .pagination-item.active {
+      background-color: #4F46E5;
+      color: white;
+      border-color: #4F46E5;
+    }
+    .pagination-item.disabled { opacity: 0.5; cursor: not-allowed; }
+    @media (max-width: 640px) {
+      .action-buttons { justify-content: flex-end; margin-left: auto; }
+      .bottom-nav { left: 0; right: 0; margin-left: 0 !important; width: 100%;}
+      main { padding-bottom: 5rem; }
+      .pedido-card { padding: 1rem; }
+      .pedido-card h3 { font-size: 1rem; }
+      .pedido-card p { font-size: 0.875rem; }
+      .pagination-item { width: 2rem; height: 2rem; }
+      .filter-bar { flex-direction: column; }
+    }
+  </style>
 </head>
 <body>
+  <div id="getdify" data-getdify="pedidos-mecanica" style="display:none;"></div>
 
-    <div class="header-gradient">
-        <div class="mx-auto relative" style="max-width: 1024px;">
-            <div class="nav-button absolute top-6 left-0" onclick="window.location.href = 'carros_ficha.php'">
-                <i class="fas fa-chevron-left text-primary"></i>
-            </div>
-            <div class="nav-button absolute top-6 right-0" onclick="redirectHome()">
-                <i class="fas fa-home text-primary"></i>
-            </div>
-            
-            <div class="header-content">
-                <div class="header-icon bg-white/30 p-4 rounded-full mx-auto w-16 h-16 flex items-center justify-center backdrop-blur-sm shadow-md">
-                    <i class="fas fa-clipboard-check text-white text-2xl"></i>
-                </div>
-                <h1 class="header-title">Ficha de Comunicação de Defeitos</h1>
-                <p class="header-subtitle">Relate problemas encontrados no veículo: <?php echo $veiculo_display_nome; ?></p>
-            </div>
-            
-            <div class="absolute bottom-4 left-0 w-full px-6">
-                <div class="progress-container max-w-md mx-auto">
-                    <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
-                </div>
-            </div>
-        </div>
-    </div>
+  <script>
+    window.profilePhoto = <?= json_encode($profilePhoto) ?>;
+    window.userName = <?= json_encode($userName) ?>;
+    window.pedidosAtivos = <?= json_encode($pedidos_ativos) ?>;
+    window.notificacoesDisponiveis = <?= json_encode($notificacoes_aceitas) ?>;
+    window.fichasDisponiveis = <?= json_encode($fichas_aceitas) ?>;
+    window.servicosFinalizados = <?= json_encode($servicos_finalizados) ?>;
+    window.totalPaginas = <?= json_encode($total_paginas) ?>;
+    window.paginaAtual = <?= json_encode($pagina_atual) ?>;
+    window.listaSecretarias = <?= json_encode($lista_secretarias) ?>;
+  </script>
 
+  <div id="root"></div>
 
-    <div class="app-container">
-        <?php
-        if (isset($_SESSION['mensagem'])) {
-            echo '<div id="session-message-toast" class="notification-toast success show"><i class="fas fa-check-circle"></i> ' . htmlspecialchars($_SESSION['mensagem']) . '</div>';
-            unset($_SESSION['mensagem']);
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
+  <script type="text/babel">
+    function App() {
+      const [activeTab, setActiveTab] = React.useState('pedidos');
+      const [photoError, setPhotoError] = React.useState(false);
+      const [selectedPedido, setSelectedPedido] = React.useState(null);
+      const [showModal, setShowModal] = React.useState(false);
+      const [modalContent, setModalContent] = React.useState(null);
+      const [timerInterval, setTimerInterval] = React.useState({});
+      const [notificacoesDisponiveisState, setNotificacoesDisponiveis] = React.useState(window.notificacoesDisponiveis);
+      const [fichasDisponiveisState, setFichasDisponiveis] = React.useState(window.fichasDisponiveis);
+      const [pedidosAtivosState, setPedidosAtivos] = React.useState(window.pedidosAtivos);
+      const [servicosFinalizadosState, setServicosFinalizados] = React.useState(window.servicosFinalizados);
+      const [paginaAtual, setPaginaAtual] = React.useState(window.paginaAtual);
+      const [totalPaginas, setTotalPaginas] = React.useState(window.totalPaginas);
+      const [timers, setTimers] = React.useState({});
+      const [loading, setLoading] = React.useState(false);
+
+      const [filters, setFilters] = React.useState({
+        secretaria: new URLSearchParams(window.location.search).get('secretaria') || 'all',
+        ordem: new URLSearchParams(window.location.search).get('ordem') || 'DESC'
+      });
+
+      // --- INÍCIO: Funcionalidade de Etapas ---
+      const [showEtapaModal, setShowEtapaModal] = React.useState(false);
+      const [selectedServicoParaEtapa, setSelectedServicoParaEtapa] = React.useState(null);
+      const [currentEtapaLoading, setCurrentEtapaLoading] = React.useState(false);
+
+      const etapaOptions = [
+        { value: 'ANALISE_INICIAL', label: 'Análise Inicial', icon: 'fas fa-search-plus' },
+        { value: 'AGUARDANDO_PECAS', label: 'Aguardando Peças', icon: 'fas fa-boxes' },
+        { value: 'AGUARDANDO_APROVACAO', label: 'Aguardando Aprovação', icon: 'fas fa-user-check' },
+        { value: 'SERVICO_AUTORIZADO', label: 'Serviço Autorizado', icon: 'fas fa-play-circle' },
+        { value: 'EM_EXECUCAO_INTERNA', label: 'Em Execução Interna', icon: 'fas fa-tools' },
+        { value: 'FINALIZACAO_MONTAGEM', label: 'Finalização/Montagem', icon: 'fas fa-cogs' },
+        { value: 'TESTES_VALIDACAO', label: 'Testes e Validação', icon: 'fas fa-clipboard-check' },
+        { value: 'PENDENCIA_TERCEIRO', label: 'Pendência Externa', icon: 'fas fa-external-link-square-alt' },
+        { value: '', label: 'Limpar Etapa (Nenhuma)', icon: 'fas fa-times-circle' }
+      ];
+
+      const getEtapaLabel = (etapaValue) => {
+        const option = etapaOptions.find(opt => opt.value === etapaValue);
+        return option ? option.label : (etapaValue || 'Não definida');
+      };
+
+      const getEtapaIconClass = (etapaValue) => {
+        const option = etapaOptions.find(opt => opt.value === etapaValue);
+        return (option && option.icon) ? option.icon : 'fa-info-circle';
+      };
+
+      const handleOpenEtapaModal = (pedido) => {
+        setSelectedServicoParaEtapa(pedido);
+        setShowEtapaModal(true);
+      };
+
+      const handleSalvarEtapa = async (servicoId, etapaValue) => {
+        if (selectedServicoParaEtapa === null || typeof servicoId === 'undefined') {
+          Swal.fire('Erro', 'Serviço não selecionado.', 'error');
+          return;
         }
-        if (isset($_SESSION['erro'])) {
-            echo '<div id="session-message-toast" class="notification-toast error show"><i class="fas fa-times-circle"></i> ' . htmlspecialchars($_SESSION['erro']) . '</div>';
-            unset($_SESSION['erro']);
+        setCurrentEtapaLoading(true);
+        try {
+          const response = await fetch('definir_etapa.php', { 
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ servico_id: servicoId, etapa: etapaValue }),
+          });
+          const data = await response.json();
+          if (!response.ok || !data.success) {
+            const errorMessage = data.message || 'Falha ao definir a etapa.';
+            throw new Error(errorMessage);
+          }
+          setShowEtapaModal(false);
+          refreshPageWithFilters(); 
+          Swal.fire('Sucesso!', `Etapa definida: ${getEtapaLabel(etapaValue)}`, 'success');
+        } catch (error) {
+          Swal.fire('Erro!', error.message, 'error');
+          console.error("Erro em handleSalvarEtapa:", error);
+        } finally {
+          setCurrentEtapaLoading(false);
+          setSelectedServicoParaEtapa(null); 
         }
-        if (isset($_SESSION['erro_km'])) {
-            echo '<div id="session-message-toast-km" class="notification-toast error show"><i class="fas fa-exclamation-triangle"></i> ' . htmlspecialchars($_SESSION['erro_km']) . '</div>';
-            unset($_SESSION['erro_km']);
-        }
-        if (isset($_SESSION['erro_veiculo'])) {
-            echo '<div id="session-message-toast-veiculo" class="notification-toast error show"><i class="fas fa-exclamation-triangle"></i> ' . htmlspecialchars($_SESSION['erro_veiculo']) . '</div>';
-            unset($_SESSION['erro_veiculo']);
-        }
-         if (isset($_SESSION['info_veiculo'])) {
-            echo '<div id="session-message-toast-info" class="notification-toast info show"><i class="fas fa-info-circle"></i> ' . htmlspecialchars($_SESSION['info_veiculo']) . '</div>';
-            unset($_SESSION['info_veiculo']);
-        }
-        ?>
+      };
+      // --- FIM: Funcionalidade de Etapas ---
 
-        <div class="content-body">
-            <div class="forms-container px-4 md:px-6 pt-6">
-                <form action="salvar_ficha.php" method="POST" id="checklistForm">
-                    <input type="hidden" name="status" value="<?php echo $form_status; ?>">
-                    
-                    <div class="form-section">
-                        <div class="form-section-title">
-                            <i class="fas fa-user-circle form-section-icon"></i>
-                            <span>Informações do Condutor</span>
-                        </div>
-                        
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Nome</label>
-                                <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                    <div class="input-icon"><i class="fas fa-user"></i></div>
-                                    <input type="text" name="nome" class="input-uniform-width bg-transparent focus:outline-none pl-6" value="<?php echo htmlspecialchars($user_name); ?>" readonly>
-                                </div>
-                            </div>
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Secretaria</label>
-                                <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                    <div class="input-icon"><i class="fas fa-building"></i></div>
-                                    <input type="text" name="secretaria" class="input-uniform-width bg-transparent focus:outline-none pl-6" value="<?php echo htmlspecialchars($secretaria); ?>" readonly>
-                                </div>
-                            </div>
-                        </div>
+      const refreshPageWithFilters = () => {
+          const urlParams = new URLSearchParams(window.location.search);
+          urlParams.set('pagina', '1');
+          urlParams.set('secretaria', filters.secretaria);
+          urlParams.set('ordem', filters.ordem);
+          window.location.search = urlParams.toString();
+      };
+      
+      const handleFilterChange = (e) => {
+        const { name, value } = e.target;
+        const newFilters = {...filters, [name]: value};
+        setFilters(newFilters);
+        const urlParams = new URLSearchParams(window.location.search);
+        urlParams.set('pagina', '1');
+        urlParams.set(name, value);
+        window.location.search = urlParams.toString();
+      };
 
-                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Data</label>
-                                <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                    <div class="input-icon"><i class="fas fa-calendar-day"></i></div>
-                                    <input type="date" name="data" id="data" class="input-uniform-width bg-transparent focus:outline-none pl-6" value="<?php echo date('Y-m-d'); ?>" readonly>
-                                </div>
-                            </div>
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Hora</label>
-                                <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                    <div class="input-icon"><i class="fas fa-clock"></i></div>
-                                    <input type="time" id="idhora" name="hora" class="input-uniform-width bg-transparent focus:outline-none pl-6" required readonly>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+      const toggleSortOrder = () => {
+        const newOrder = filters.ordem === 'DESC' ? 'ASC' : 'DESC';
+        const newFilters = {...filters, ordem: newOrder };
+        setFilters(newFilters);
+        const urlParams = new URLSearchParams(window.location.search);
+        urlParams.set('pagina', '1');
+        urlParams.set('ordem', newOrder);
+        window.location.search = urlParams.toString();
+      };
 
-                    <div class="form-section">
-                        <div class="form-section-title">
-                            <i class="fas fa-car form-section-icon"></i>
-                            <span>Informações do Veículo</span>
-                        </div>
-                        
-                         <?php if (!empty($veiculo_nome_identificador)): ?>
-                        <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
-                            <div class="flex items-center">
-                                <div class="bg-gray-100 rounded-full p-2 mr-3 flex-shrink-0">
-                                    <i class="fas fa-car text-primary"></i>
-                                </div>
-                                <div>
-                                    <h3 class="font-semibold"><?php echo htmlspecialchars($tipo_veiculo ?? 'Não definido'); ?></h3>
-                                    <p class="text-xs text-gray-500"><?php echo htmlspecialchars($placa ?? 'Placa não disponível'); ?></p>
-                                </div>
-                            </div>
-                            <?php if (isset($status_veiculo) && $status_veiculo !== ''): ?>
-                                <?php
-                                $status_class = 'status-badge-success';
-                                $status_text_display = htmlspecialchars($status_veiculo);
-                                if ($status_veiculo === 'Em manutenção') { $status_class = 'status-badge-warning'; } 
-                                elseif ($status_veiculo === 'Inoperante') { $status_class = 'status-badge-danger'; }
-                                ?>
-                                <span class="status-badge <?php echo $status_class; ?>">
-                                    <i class="fas fa-circle text-xs mr-2"></i>
-                                    <?php echo $status_text_display; ?>
-                                </span>
-                            <?php endif; ?>
-                        </div>
+      const handlePageChange = (newPage) => {
+        if (newPage < 1 || newPage > totalPaginas || newPage === paginaAtual) return;
+        const urlParams = new URLSearchParams(window.location.search);
+        urlParams.set('pagina', newPage);
+        window.location.search = urlParams.toString();
+      };
 
-                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Último Km/h Registrado</label>
-                                <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                    <div class="input-icon"><i class="fas fa-tachometer-alt"></i></div>
-                                    <input type="text" id="kminicial" name="km_inicial" class="input-uniform-width bg-transparent focus:outline-none pl-6" value="<?php echo number_format($km_inicial, 0, ',', '.'); ?>" readonly >
-                                </div>
-                            </div>
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Identificação do Veículo</label>
-                                <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                   <div class="input-icon"><i class="fas fa-id-card"></i></div>
-                                    <input type="text" id="codigo" name="veiculo_id" class="input-uniform-width bg-transparent focus:outline-none pl-6" value="<?php echo htmlspecialchars($veiculo_nome_identificador ?? ''); ?>" readonly >
-                                    <input type="hidden" name="placa" value="<?php echo htmlspecialchars($placa ?? ''); ?>">
-                                    <input type="hidden" name="nome_veiculo" value="<?php echo htmlspecialchars($tipo_veiculo ?? ''); ?>">
-                                </div>
-                            </div>
-                        </div>
-                        <?php else: ?>
-                            <p class="text-center text-gray-600 py-4">Nenhum veículo carregado. Por favor, selecione um veículo na <a href="carros.php" class="text-primary hover:underline">página de veículos</a>.</p>
-                        <?php endif; ?>
-                    </div>
-
-
-                    <?php if (!empty($veiculo_nome_identificador)): ?>
-                    <div class="form-section">
-                        <div class="form-section-title">
-                            <i class="fas fa-clipboard-list form-section-icon"></i>
-                            <span>Comunicação de Defeitos</span>
-                        </div>
-                        
-                        <div class="search-container mb-5">
-                            <i class="fas fa-search search-icon"></i>
-                            <input type="text" id="defect-search" class="search-input bg-gray-50" placeholder="Buscar um tipo de defeito...">
-                        </div>
-
-                        <div class="defect-categories space-y-8">
-                            
-                            <div class="category-section border-t pt-4">
-                                <h3 class="text-md font-semibold text-gray-700 mb-4 flex items-center">
-                                    <i class="fas fa-tools mr-2 text-primary"></i>
-                                    Sistemas Mecânicos
-                                </h3>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 defect-group">
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Motor</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-cog"></i></div>
-                                                <select name="motor" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="motor">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Roncando/Alto/gando">Roncando/Alto/gando</option>
-                                                    <option value="Falhando/Otando/Brita do pegar">Falhando/Otando/Difícil de pegar</option>
-                                                    <option value="Super aquecimento/Motor">Superaquecimento</option>
-                                                    <option value="Turbo vazando">Turbo vazando</option>
-                                                    <option value="Marcha lenta irregular">Marcha lenta irregular</option>
-                                                    <option value="Consumo excessivo combustível">Consumo excessivo combustível</option>
-                                                    <option value="Freio motor não acionado">Freio motor não acionado</option>
-                                                    <option value="Vazando óleo/Vazando água">Vazando óleo/Vazando água</option>
-                                                    <option value="Top break falhando">Top break falhando</option>
-                                                    <option value="Consumindo óleo">Consumindo óleo</option>
-                                                    <option value="Outro">Outro defeito</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_motor" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Caixa de Mudanças</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-cogs"></i></div>
-                                                <select name="caixa_mudancas" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="caixa">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Difícil de engatar marchas">Difícil de engatar marchas</option>
-                                                    <option value="Escapando marcha">Escapando marcha</option>
-                                                    <option value="Ruído na marcha/lavador/marcha">Ruído na marcha</option>
-                                                    <option value="Barulho no câmbio">Barulho no câmbio</option>
-                                                    <option value="Outro">Outro defeito</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_caixa_mudancas" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Suspensão</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-car-crash"></i></div>
-                                                <select name="suspensao" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="suspensao">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Muito baixando/batendo">Muito baixa/batendo</option>
-                                                    <option value="Mola quebrada">Mola quebrada</option>
-                                                    <option value="Dura/Muito macia">Dura/Muito macia</option>
-                                                    <option value="Tensores com folga">Tensores com folga</option>
-                                                    <option value="Outro">Outro defeito</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_suspensao" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Direção</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-car-side"></i></div>
-                                                <select name="direcao" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="direcao">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Desalinhada">Desalinhada</option>
-                                                    <option value="Com folga">Com folga</option>
-                                                    <option value="Trepidando">Trepidando</option>
-                                                    <option value="Dura">Dura</option>
-                                                    <option value="Puxando para/lado">Puxando para um lado</option>
-                                                    <option value="Nível de óleo baixo">Nível de óleo baixo</option>
-                                                    <option value="Outro">Outro defeito</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_direcao" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Embreagem</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-sliders-h"></i></div>
-                                                <select name="embreagem" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="embreagem">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Embregagem patinando">Embreagem patinando</option>
-                                                    <option value="Emb. trepidando">Embreagem trepidando</option>
-                                                    <option value="Embregagem/alta">Embreagem alta</option>
-                                                    <option value="Embregagem baixa">Embreagem baixa</option>
-                                                    <option value="Cabo embr. quebrado">Cabo de embreagem quebrado</option>
-                                                    <option value="Vazando/óleo">Vazando óleo</option>
-                                                    <option value="Outro">Outro defeito</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_embreagem" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Freios</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-stop-circle"></i></div>
-                                                <select name="freios" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="freios">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Chiando">Chiando</option>
-                                                    <option value="Puxando">Puxando</option>
-                                                    <option value="Com vazamento de ar">Com vazamento de ar</option>
-                                                    <option value="Trepidando">Trepidando</option>
-                                                    <option value="Precisando de ajuste">Precisando de ajuste</option>
-                                                    <option value="Precisando de troca">Precisando de troca</option>
-                                                    <option value="Pedal alto">Pedal alto</option>
-                                                    <option value="Freio de mão não segura">Freio de mão não segura</option>
-                                                    <option value="Freio de mão solto">Freio de mão solto</option>
-                                                    <option value="Freio de mão duro">Freio de mão duro</option>
-                                                    <option value="Outro">Outro defeito</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_freios" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <div class="category-section border-t pt-4">
-                                <h3 class="text-md font-semibold text-gray-700 mb-4 flex items-center">
-                                    <i class="fas fa-car-alt mr-2 text-primary"></i>
-                                    Carroceria e Sistemas Externos
-                                </h3>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 defect-group">
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Carroceria</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-car"></i></div>
-                                                <select name="carroceria" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="carroceria">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Portas mal ajust./fazendo barulho">Portas mal ajustadas/barulho</option>
-                                                    <option value="Portas difícil de abrir/fechar">Portas difíceis de abrir/fechar</option>
-                                                    <option value="Vidros fazendo/barulho/empoeirado">Vidros com barulho/empoeirados</option>
-                                                    <option value="Escapamento quebrado/furado">Escapamento quebrado/furado</option>
-                                                    <option value="Escapamento solto">Escapamento solto</option>
-                                                    <option value="Para-choque/Para-lama amassado">Para-choque/Para-lama amassado</option>
-                                                    <option value="Porta/Capô amassado">Porta/Capô amassado</option>
-                                                    <option value="Outro">Outro defeito</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_carroceria" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Rodas e Pneus</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-circle"></i></div>
-                                                <select name="rodas" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="rodas">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Batendo a normal">Batendo</option>
-                                                    <option value="Parafuso normal">Parafuso desgastado</option>
-                                                    <option value="Parafuso/Porca/faltando">Parafuso/Porca faltando</option>
-                                                    <option value="Parafuso/Porca/soltos">Parafuso/Porca soltos</option>
-                                                    <option value="Pneu cortado/furado">Pneu cortado/furado</option>
-                                                    <option value="Outro">Outro defeito</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_rodas" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Sistema Elétrico</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-bolt"></i></div>
-                                                <select name="sistema_eletrico" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="eletrico">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Bateria fraca">Bateria fraca</option>
-                                                    <option value="Vazando solução da bateria">Vazamento de solução da bateria</option>
-                                                    <option value="Terminais cabos da bat. Danificados">Terminais/cabos danificados</option>
-                                                    <option value="Motor de partida/Alternador não/carrega">Motor de partida/Alternador com defeito</option>
-                                                    <option value="Fios de ligação danificados">Fios danificados</option>
-                                                    <option value="Buzina fraca ou não funciona">Buzina fraca/não funciona</option>
-                                                    <option value="Luzes do painel/com/defeito">Luzes do painel com defeito</option>
-                                                    <option value="Luzes con/super/aqüecida/queimada">Luzes queimadas</option>
-                                                    <option value="Velocímetro com defeito">Velocímetro com defeito</option>
-                                                    <option value="Outro">Outro defeito</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_sistema_eletrico" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Acessórios</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-puzzle-piece"></i></div>
-                                                <select name="acessorios" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="acessorios">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Rádio não funciona">Rádio não funciona</option>
-                                                    <option value="Antena danificada">Antena danificada</option>
-                                                    <option value="Ar condicionado o/ defeito">Ar condicionado com defeito</option>
-                                                    <option value="Cinto de segurança com/defeito">Cinto de segurança com defeito</option>
-                                                    <option value="Extintor/descarregado/faltando">Extintor descarregado/faltando</option>
-                                                    <option value="Macaco com defeito/faltando">Macaco com defeito/faltando</option>
-                                                    <option value="Triângulo com defeito/faltando">Triângulo com defeito/faltando</option>
-                                                    <option value="Chave de roda/danificada/faltando">Chave de roda danificada/faltando</option>
-                                                    <option value="Documentos do veículo vencido">Documentos do veículo vencidos</option>
-                                                    <option value="Outro">Outro defeito</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_acessorios" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <div class="category-section border-t pt-4">
-                                <h3 class="text-md font-semibold text-gray-700 mb-4 flex items-center">
-                                    <i class="fas fa-tint mr-2 text-primary"></i>
-                                    Fluidos e Refrigeração
-                                </h3>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 defect-group">
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Sistema de Combustível</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-gas-pump"></i></div>
-                                                <select name="alimentacao" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="alimentacao">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Reservatório de comb. vazando">Reservatório vazando</option>
-                                                    <option value="Cabo do acelerador enroscando">Cabo do acelerador enroscando</option>
-                                                    <option value="Bomba/Boia de comb. vazando">Bomba/Boia vazando</option>
-                                                    <option value="Reserv. Combustível sem/tampa">Reservatório sem tampa</option>
-                                                    <option value="Outro">Outro defeito</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_alimentacao" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Arrefecimento</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-thermometer-half"></i></div>
-                                                <select name="arrefecimento" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="arrefecimento">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Radiador/Com/elavazando">Radiador vazando</option>
-                                                    <option value="Tampa do radiador não veda">Tampa do radiador não veda</option>
-                                                    <option value="Ventoinha não funciona">Ventoinha não funciona</option>
-                                                    <option value="Correias/chando/grilando/gastas">Correias desgastadas</option>
-                                                    <option value="Juntas de água com defeito">Juntas de água com defeito</option>
-                                                    <option value="Fluído de radiador faltando">Fluido do radiador baixo</option>
-                                                    <option value="Outro">Outro defeito</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_arrefecimento" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Lavagem/Lubrificantes</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-shower"></i></div>
-                                                <select name="lavagem_lubrificantes" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="lavagem">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Lavagem completa">Precisa de lavagem completa</option>
-                                                    <option value="Lavagem interna">Precisa de lavagem interna</option>
-                                                    <option value="Completar óleo do diferencial">Completar óleo do diferencial</option>
-                                                    <option value="Completar óleo do câmbio">Completar óleo do câmbio</option>
-                                                    <option value="Trocar óleo do motor">Trocar óleo do motor</option>
-                                                    <option value="Outro">Outro serviço</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_lavagem_lubrificantes" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                    <div class="defect-item">
-                                        <label class="block text-sm font-medium text-gray-700 mb-1">Transmissão</label>
-                                        <div class="relative">
-                                            <div class="input-field bg-gray-50 rounded-xl p-3 border border-gray-200">
-                                                <div class="input-icon"><i class="fas fa-cogs"></i></div>
-                                                <select name="transmissao_9500" class="input-uniform-width bg-transparent focus:outline-none" onchange="handleSelectChange(this);" data-category="transmissao">
-                                                    <option value="">Sem defeitos</option>
-                                                    <option value="Motor barulho anormal">Barulho anormal</option>
-                                                    <option value="Vibração excessiva">Vibração excessiva</option>
-                                                    <option value="Vazando óleo">Vazando óleo</option>
-                                                    <option value="Outro">Outro defeito</option>
-                                                </select>
-                                                <div class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 select-chevron"><i class="fas fa-chevron-down text-xs"></i></div>
-                                            </div>
-                                            <textarea name="obs_transmissao_9500" class="observation-field hidden" placeholder="Descreva o problema em detalhes"></textarea>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <button type="submit" id="submit-button" class="btn-primary w-full py-4 rounded-xl text-white font-bold shadow-md hover:shadow-lg transition-all mt-8 flex items-center justify-center gap-2">
-                            <i class="fas fa-clipboard-check"></i> 
-                            <span>Enviar Comunicação de Defeitos</span>
-                        </button>
-                    </div>
-                    <?php endif; ?>
-                </form>
-            </div>
-        </div>
-    </div>
-
-    <div class="modal-overlay hidden" id="confirmationModal">
-        <div class="modal-container">
-            <div class="modal-header">
-                <h2 class="text-xl font-bold">Confirmar Envio</h2>
-            </div>
-            <div class="modal-body">
-                <div id="modal-dynamic-icon" class="modal-icon"> <i class="fas fa-question-circle fa-beat"></i> </div>
-                <h2 class="modal-title">Deseja enviar a ficha?</h2>
-                <p class="modal-message">
-                    Você reportou <span id="defect-count" class="font-bold text-primary">0</span> problema(s) no veículo. 
-                    Confirma o envio da Ficha de Comunicação de Defeitos?
-                </p>
-                <p class="text-sm mt-2">
-                    <?php if ($user_role === 'admin' || $user_role === 'geraladm'): ?>
-                    <span class="text-success font-medium"><i class="fas fa-check-circle mr-1"></i> Esta ficha será enviada com status "aceito".</span>
-                    <?php else: ?>
-                    <span class="text-warning font-medium"><i class="fas fa-clock mr-1"></i> Esta ficha será enviada com status "pendente" e aguardará aprovação.</span>
-                    <?php endif; ?>
-                </p>
-            </div>
-            <div class="modal-footer">
-                <button id="confirm-submit" class="modal-button modal-button-primary"><i class="fas fa-check mr-2"></i> Confirmar</button>
-                <button id="cancel-submit" class="modal-button modal-button-secondary"><i class="fas fa-times mr-2"></i> Cancelar</button>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        function handleSelectChange(selectElement) {
-            updateSelectStyle(selectElement);
-            showObservation(selectElement);
-            updateProgress();
-        }
-
-        document.getElementById('checklistForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            
-            const selects = document.querySelectorAll('.defect-item select');
-            let defectCount = 0;
-            
-            selects.forEach(select => {
-                if (select.value && select.value !== "") {
-                    defectCount++;
-                }
-            });
-            
-            document.getElementById('defect-count').textContent = defectCount;
-            
-            const modalIconContainer = document.getElementById('modal-dynamic-icon');
-            const modalTitle = document.querySelector('#confirmationModal .modal-title');
-            const modalMessage = document.querySelector('#confirmationModal .modal-message');
-
-            if (defectCount === 0) {
-                modalIconContainer.innerHTML = '<i class="fas fa-thumbs-up fa-beat success"></i>';
-                modalTitle.textContent = "Nenhum defeito reportado!";
-                modalMessage.innerHTML = `O veículo será registrado como "Sem defeitos". <br>Confirma o envio?`;
-            } else {
-                modalIconContainer.innerHTML = '<i class="fas fa-question-circle fa-beat text-primary"></i>';
-                modalTitle.textContent = "Deseja enviar a ficha?";
-                modalMessage.innerHTML = `Você reportou <span class="font-bold text-primary">${defectCount}</span> problema(s) no veículo. Confirma o envio?`;
-            }
-
-            document.getElementById('confirmationModal').classList.remove('hidden');
+      React.useEffect(() => {
+        const servicosEmAndamento = pedidosAtivosState.filter(pedido => pedido.status === 'em_andamento');
+        servicosEmAndamento.forEach(servico => {
+          if (servico.inicio_servico && !timers[servico.id] && !timerInterval[servico.id]) {
+            iniciarTimerParaServico(servico.id, new Date(servico.inicio_servico));
+          }
         });
+        return () => {
+          Object.values(timerInterval).forEach(clearInterval);
+        };
+      }, [pedidosAtivosState]);
+      
+      const formatDate = (dateString, timeString = null) => {
+        if (!dateString) return 'Sem informações';
+        // A data do banco vem como YYYY-MM-DD
+        const datePart = dateString.split(' ')[0]; 
+        let fullDateString = datePart;
+
+        if (timeString) {
+            fullDateString = `${datePart}T${timeString}`;
+        }
         
-        document.getElementById('confirm-submit').addEventListener('click', function() {
-            document.getElementById('confirmationModal').classList.add('hidden');
-            document.getElementById('checklistForm').submit();
-        });
+        const dateObj = new Date(fullDateString);
+
+        if (isNaN(dateObj.getTime())) {
+            const fallbackDateObj = new Date(dateString); 
+            if(isNaN(fallbackDateObj.getTime())) return 'Data inválida';
+            return fallbackDateObj.toLocaleString('pt-BR', { timeZone: 'America/Cuiaba', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+        }
+
+        const options = { timeZone: 'America/Cuiaba', day: '2-digit', month: '2-digit', year: 'numeric' };
+        if(timeString) {
+          options.hour = '2-digit';
+          options.minute = '2-digit';
+          options.second = '2-digit';
+        }
+        return dateObj.toLocaleString('pt-BR', options);
+      };
+      
+      const iniciarTimerParaServico = (servicoId, startTime) => {
+        const inicio = startTime instanceof Date && !isNaN(startTime) ? startTime : new Date();
+        const agora = new Date();
+        let tempoDesdeCriacao = Math.max(0, Math.floor((agora - inicio) / 1000));
         
-        document.getElementById('cancel-submit').addEventListener('click', function() {
-            document.getElementById('confirmationModal').classList.add('hidden');
-        });
+        setTimers(prev => ({
+          ...prev,
+          [servicoId]: { tempoDecorrido: tempoDesdeCriacao, startTime: inicio }
+        }));
+        
+        if (timerInterval[servicoId]) clearInterval(timerInterval[servicoId]);
 
-        function updateSelectStyle(selectElement) {
-            const inputField = selectElement.closest('.input-field');
-            inputField.classList.remove('select-option-0', 'select-option-selected');
-            
-            if (selectElement.selectedIndex === 0) {
-                inputField.classList.add('select-option-0');
-            } else {
-                inputField.classList.add('select-option-selected');
+        const intervalId = setInterval(() => {
+          setTimers(prev => {
+            const currentTimer = prev[servicoId];
+            if (!currentTimer) { 
+              clearInterval(intervalId);
+              const newIntervals = {...timerInterval};
+              delete newIntervals[servicoId];
+              setTimerInterval(newIntervals);
+              return prev;
             }
-        }
+            return {
+              ...prev,
+              [servicoId]: { ...currentTimer, tempoDecorrido: (currentTimer.tempoDecorrido || 0) + 1 }
+            };
+          });
+        }, 1000);
+        
+        setTimerInterval(prev => ({ ...prev, [servicoId]: intervalId }));
+      };
 
-        function showObservation(select) {
-            const observationField = select.closest('.defect-item').querySelector('textarea');
-            if (select.selectedIndex !== 0) {
-                observationField.classList.remove('hidden');
-            } else {
-                observationField.classList.add('hidden');
-                observationField.value = '';
-            }
+      const pararTimer = (servicoId) => {
+        if (timerInterval[servicoId]) {
+          clearInterval(timerInterval[servicoId]);
+          setTimerInterval(prev => {
+            const newIntervals = {...prev};
+            delete newIntervals[servicoId];
+            return newIntervals;
+          });
         }
+      };
 
-        function updateProgress() {
-            const selects = document.querySelectorAll('.defect-item select');
-            let filled = 0;
-            
-            selects.forEach(select => {
-                if (select.value !== "") {
-                    filled++;
-                }
+      const handlePrimeiraAceitacao = async (id) => {
+          setLoading(true);
+          try {
+            const response = await fetch('primeira_aceitacao.php', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id }),
             });
-            
-            const totalFields = selects.length;
-            const percentage = totalFields > 0 ? ((filled / totalFields) * 100) : 0;
-            
-            const progressBar = document.getElementById('progress-bar');
-            if(progressBar) progressBar.style.width = percentage + '%';
-            
-            const submitButton = document.getElementById('submit-button');
-            if (submitButton) {
-                if (filled === 0) {
-                    submitButton.innerHTML = '<i class="fas fa-clipboard-check"></i> <span>Enviar Sem Defeitos</span>';
+            const data = await response.json();
+            if (!response.ok || !data.success) throw new Error(data.message || 'Erro ao aceitar notificação.');
+            Swal.fire('Sucesso!', 'Notificação aceita! Verifique a aba de Pedidos.', 'success').then(() => refreshPageWithFilters());
+            setActiveTab('pedidos');
+          } catch (error) {
+            Swal.fire('Erro!', error.message, 'error');
+          } finally {
+            setLoading(false);
+          }
+      };
+
+      const handlePrimeiraAceitacaoFicha = async (id) => {
+         setLoading(true);
+         try {
+            const response = await fetch('primeira_aceitacao_ficha.php', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id }),
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success) throw new Error(data.message || 'Erro ao aceitar ficha.');
+            Swal.fire('Sucesso!', 'Ficha aceita! Verifique a aba de Pedidos.', 'success').then(() => refreshPageWithFilters());
+            setActiveTab('pedidos');
+          } catch (error) {
+            Swal.fire('Erro!', error.message, 'error');
+          } finally {
+            setLoading(false);
+          }
+      };
+
+      const handleDismiss = (id, type) => {
+          Swal.fire({
+            title: 'Dispensar item?',
+            text: "Esta ação não poderá ser revertida e o item não aparecerá mais para você.",
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonColor: '#d33',
+            cancelButtonColor: '#3085d6',
+            confirmButtonText: 'Sim, dispensar!',
+            cancelButtonText: 'Cancelar'
+          }).then((result) => {
+            if (result.isConfirmed) {
+              setLoading(true);
+              fetch('dispensar_item.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id, type }),
+              })
+              .then(res => res.json())
+              .then(data => {
+                if (data.success) {
+                  Swal.fire('Dispensado!', 'O item foi removido da sua lista.', 'success').then(() => refreshPageWithFilters());
                 } else {
-                    submitButton.innerHTML = `<i class="fas fa-exclamation-triangle"></i> <span>Enviar ${filled} Defeito(s) Reportado(s)</span>`;
+                  Swal.fire('Erro', data.message || 'Não foi possível dispensar o item.', 'error');
                 }
+              })
+              .catch(err => Swal.fire('Erro de Conexão', err.toString(), 'error'))
+              .finally(() => setLoading(false));
             }
+          });
+      };
+
+      const handleIniciarServico = async (id) => {
+        try {
+          setLoading(true);
+          const response = await fetch('iniciar_servico.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id }),
+          });
+          const data = await response.json();
+          if (!response.ok || !data.success) throw new Error(data.message || 'Erro ao iniciar serviço.');
+          const startTime = data.inicio_servico ? new Date(data.inicio_servico) : new Date();
+          iniciarTimerParaServico(id, startTime);
+          refreshPageWithFilters(); 
+          Swal.fire('Sucesso!', 'Serviço iniciado!', 'success');
+        } catch (error) {
+          Swal.fire('Erro!', error.message, 'error');
+        } finally {
+          setLoading(false);
+        }
+      };
+      
+      const handleFinalizarServico = async (pedidoId) => {
+        try {
+          setLoading(true);
+          let tempoTotal = 0;
+          if (timers[pedidoId] && typeof timers[pedidoId].tempoDecorrido !== 'undefined') {
+            tempoTotal = timers[pedidoId].tempoDecorrido;
+          }
+          pararTimer(pedidoId);
+          const response = await fetch('finalizar_servico.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              pedido_id: pedidoId,
+              finish_time: new Date().toISOString(),
+              total_time: tempoTotal 
+            }),
+          });
+          const data = await response.json();
+          if (!response.ok || !data.success) throw new Error(data.message || 'Falha ao finalizar serviço.');
+          setTimers(prev => {
+            const newTimers = {...prev};
+            delete newTimers[pedidoId];
+            return newTimers;
+          });
+          refreshPageWithFilters();
+          Swal.fire('Sucesso!', 'Serviço finalizado!', 'success');
+        } catch (error) {
+          Swal.fire('Erro!', error.message, 'error');
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const formatarTempo = (segundos) => {
+        if (typeof segundos !== 'number' || isNaN(segundos) || segundos < 0) return "00:00:00";
+        const horas = Math.floor(segundos / 3600);
+        const minutos = Math.floor((segundos % 3600) / 60);
+        const segs = Math.floor(segundos % 60);
+        return [
+          horas.toString().padStart(2, '0'),
+          minutos.toString().padStart(2, '0'),
+          segs.toString().padStart(2, '0')
+        ].join(':');
+      };
+
+      const handleVerDetalhes = (item) => {
+        setSelectedPedido(item);
+        let conteudoPrincipal = [];
+        let informacoesBasicas = [];
+        let informacoesSolicitante = [];
+        
+        const submitterName = item.submitter_name || item.notif_submitter_name || item.ficha_submitter_name;
+        const submitterCpf = item.submitter_cpf || item.notif_submitter_cpf || item.ficha_submitter_cpf;
+        const submitterSecretaria = item.submitter_secretaria || item.notif_submitter_secretaria || item.ficha_submitter_secretaria;
+
+        if(submitterName) {
+            informacoesSolicitante.push({ label: 'Solicitante', value: submitterName });
+            informacoesSolicitante.push({ label: 'CPF do Solicitante', value: submitterCpf });
+            informacoesSolicitante.push({ label: 'Secretaria do Solicitante', value: submitterSecretaria });
         }
 
-        document.getElementById('defect-search').addEventListener('input', function() {
-            const searchTerm = this.value.toLowerCase().trim();
-            const defectItems = document.querySelectorAll('.defect-item');
-            const categorySections = document.querySelectorAll('.category-section');
-
-            defectItems.forEach(item => {
-                const label = item.querySelector('label').textContent.toLowerCase();
-                const matches = label.includes(searchTerm);
-                item.style.display = matches ? '' : 'none';
-            });
-            
-            categorySections.forEach(section => {
-                const visibleItems = Array.from(section.querySelectorAll('.defect-item'))
-                    .filter(item => item.style.display !== 'none');
-                section.style.display = visibleItems.length > 0 ? '' : 'none';
-            });
+        informacoesBasicas.push({
+          type: 'badge', label: 'Tipo',
+          value: item.tipo_origem === 'notificacao' ? 'Notificação' : (item.tipo_origem === 'ficha' ? 'Ficha' : 'Pedido'),
+          className: item.tipo_origem === 'notificacao' ? 'badge-notificacao' : (item.tipo_origem === 'ficha' ? 'badge-ficha' : 'badge-pedido')
         });
 
-        function redirectHome() {
-            let role = '<?php echo isset($_SESSION['role']) ? $_SESSION['role'] : 'user'; ?>';
-            if (role === 'user') {
-                window.location.href = 'menu.php';
-            } else if (role === 'admin') {
-                window.location.href = 'menuadm.php';
-            } else if (role === 'geraladm') {
-                window.location.href = 'menugeraladm.php';
-            } else {
-                window.location.href = 'index.php';
-            }
+        informacoesBasicas.push({
+          type: 'badge', label: 'Status',
+          value: item.status === 'aceito' ? 'Aceito' : (item.status === 'em_andamento' ? 'Em andamento' : (item.status === 'finalizado' ? 'Finalizado' : 'Pendente')),
+          className: item.status === 'aceito' ? 'badge-aceito' : (item.status === 'em_andamento' ? 'badge-em-andamento' : (item.status === 'finalizado' ? 'badge-concluido' : 'badge-pendente'))
+        });
+        
+        let dataParaFormatar, horaParaFormatar;
+
+        if (item.tipo_origem === 'notificacao') {
+          informacoesBasicas.push({ type: 'text', label: 'Veículo', value: `${item.prefixo || 'N/A'} • ${item.secretaria || 'Sem secretaria'}` });
+          dataParaFormatar = item.data || item.notificacao_data_finalizado; // CORREÇÃO: Usando item.data
+        } else if (item.tipo_origem === 'ficha') {
+          informacoesBasicas.push({ type: 'text', label: 'Veículo', value: item.nome_veiculo || 'Sem nome de veículo' });
+          informacoesBasicas.push({ type: 'text', label: 'ID do Veículo', value: item.veiculo_id || 'N/A'});
+          informacoesBasicas.push({ type: 'text', label: 'Secretaria do Veículo', value: item.secretaria || 'Sem secretaria'});
+          dataParaFormatar = item.data || item.ficha_data_finalizado;
+          horaParaFormatar = item.hora || item.ficha_hora_finalizado;
+        }
+        
+        informacoesBasicas.push({ type: 'text', label: 'Data do Evento', value: formatDate(dataParaFormatar, horaParaFormatar) });
+
+        if (item.prioridade && (item.status === 'aceito' || item.status === 'em_andamento' || item.status === 'finalizado')) {
+            informacoesBasicas.push({ type: 'text', label: 'Etapa Atual', value: getEtapaLabel(item.prioridade), className: 'text-purple-700 font-semibold' });
         }
 
-        document.addEventListener("DOMContentLoaded", function() {
-            document.querySelectorAll('.defect-item select').forEach(select => {
-                handleSelectChange(select);
+        if (item.tipo_origem === 'notificacao') {
+            const camposNotificacao = [
+                { key: 'combustivel', label: 'Combustível'}, { key: 'agua', label: 'Água'},
+                { key: 'oleo', label: 'Óleo'}, { key: 'bateria', label: 'Bateria'},
+                { key: 'pneus', label: 'Pneus'}, { key: 'filtro_ar', label: 'Filtro de Ar'},
+                { key: 'lampadas', label: 'Lâmpadas'}, { key: 'sistema_eletrico', label: 'Sistema Elétrico'}
+            ];
+            camposNotificacao.forEach(({key, label}) => {
+                const obsKey = `obs_${key}`;
+                if (item[obsKey] && item[obsKey].trim() !== '') {
+                    conteudoPrincipal.push({ label: label, value: `${item[key]} (${item[obsKey]})`});
+                }
             });
-            
-            updateProgress();
-
-            function setCurrentTime() {
-                const now = new Date();
-                const hours = String(now.getHours()).padStart(2, "0");
-                const minutes = String(now.getMinutes()).padStart(2, "0");
-                const timeString = `${hours}:${minutes}`;
-                const timeInput = document.getElementById("idhora");
-                if (timeInput) timeInput.value = timeString;
+            if (conteudoPrincipal.length === 0) {
+                conteudoPrincipal.push({ label: 'Situação', value: 'Nenhuma observação registrada nos itens do checklist.'});
             }
-            setCurrentTime();
+        } else if (item.tipo_origem === 'ficha') {
+          const camposFicha = [
+            { campo: 'suspensao', label: 'Suspensão', obs: 'obs_suspensao' }, { campo: 'motor', label: 'Motor', obs: 'obs_motor' },
+            { campo: 'freios', label: 'Freios', obs: 'obs_freios' }, { campo: 'direcao', label: 'Direção', obs: 'obs_direcao' },
+            { campo: 'sistema_eletrico', label: 'Sistema Elétrico', obs: 'obs_sistema_eletrico' }, { campo: 'carroceria', label: 'Carroceria', obs: 'obs_carroceria' },
+            { campo: 'embreagem', label: 'Embreagem', obs: 'obs_embreagem' }, { campo: 'rodas', label: 'Rodas', obs: 'obs_rodas' },
+            { campo: 'transmissao_9500', label: 'Transmissão', obs: 'obs_transmissao_9500' }, { campo: 'caixa_mudancas', label: 'Caixa de Mudanças', obs: 'obs_caixa_mudancas' },
+            { campo: 'alimentacao', label: 'Alimentação', obs: 'obs_alimentacao' }, { campo: 'arrefecimento', label: 'Arrefecimento', obs: 'obs_arrefecimento' },
+            { campo: 'lavagem_lubrificantes', label: 'Lavagem/Lubrificantes', obs: 'obs_lavagem_lubrificantes' }, { campo: 'acessorios', label: 'Acessórios', obs: 'obs_acessorios' }
+          ];
+          camposFicha.forEach(({ campo, label, obs }) => {
+            if (item[campo] || item[obs]) {
+              let textoPrincipal = item[campo] ? item[campo].trim() : ""; 
+              let textoObs = item[obs] ? item[obs].trim() : ""; 
+              if(textoPrincipal && textoObs) { conteudoPrincipal.push({ label, value: `${textoPrincipal} (${textoObs})` }); }
+              else if (textoPrincipal) { conteudoPrincipal.push({ label, value: textoPrincipal }); }
+              else if (textoObs) { conteudoPrincipal.push({ label, value: `Obs: ${textoObs}` }); }
+            }
+          });
+        }
+
+        if (item.inicio_servico) { informacoesBasicas.push({ type: 'text', label: 'Início do Serviço', value: formatDate(item.inicio_servico) }); }
+        if (item.data_conclusao) { informacoesBasicas.push({ type: 'text', label: 'Conclusão', value: formatDate(item.data_conclusao) }); }
+        if (item.tempo_real && item.status === 'finalizado') { informacoesBasicas.push({ type: 'text', label: 'Tempo Total Gasto', value: formatarTempo(item.tempo_real) }); }
+
+        setModalContent(
+          <div className="p-6 md:p-8 max-w-3xl mx-auto bg-white rounded-xl shadow-lg max-h-[85vh] overflow-y-auto">
+            <h3 className="text-2xl font-bold mb-6 border-b pb-2 text-gray-700">Detalhes do Item</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
+              <div className="space-y-3">
+                <h4 className="text-lg font-semibold text-gray-700 border-b pb-1">Informações do Veículo</h4>
+                {informacoesBasicas.map((info, index) => (
+                  <div key={`info-${index}`} className="pb-2 border-b border-gray-200 last:border-b-0">
+                    <span className="font-semibold text-gray-600">{info.label}:</span>
+                    {info.type === 'badge' ? (
+                      <span className={`ml-2 px-2.5 py-0.5 rounded-full text-xs font-medium ${info.className}`}>
+                        {info.value}
+                      </span>
+                    ) : (
+                      <p className={`text-gray-800 whitespace-pre-line ml-1 inline ${info.className || ''}`}>{info.value || "N/A"}</p>
+                    )}
+                  </div>
+                ))}
+                {informacoesSolicitante.length > 0 && (
+                    <div className="mt-4 pt-3 border-t">
+                        <h4 className="text-lg font-semibold text-gray-700 border-b pb-1">Informações do Solicitante</h4>
+                        {informacoesSolicitante.map((info, index) => (
+                           <div key={`solic-${index}`} className="pb-2 border-b border-gray-200 last:border-b-0 mt-2">
+                                <span className="font-semibold text-gray-600">{info.label}:</span>
+                                <p className="text-gray-800 whitespace-pre-line ml-1 inline">{info.value || "N/A"}</p>
+                           </div>
+                        ))}
+                    </div>
+                )}
+              </div>
+              <div className="space-y-3">
+                 <h4 className="text-lg font-semibold text-gray-700 mb-2 border-b pb-1">
+                    {item.tipo_origem === 'ficha' ? 'Checklist da Ficha' : 'Checklist da Notificação'}
+                </h4>
+                {conteudoPrincipal.length > 0 ? (
+                  conteudoPrincipal.map((content, index) => (
+                    <div key={`content-${index}`} className="pb-2 border-b border-gray-200 last:border-b-0">
+                      {content.label && <span className="font-semibold text-gray-600">{content.label}:</span>}
+                      <p className={`whitespace-pre-line text-gray-800 ${content.label ? 'ml-1' : ''}`}>{content.value || "N/A"}</p>
+                    </div>
+                  ))
+                ) : ( <p className="text-gray-500 italic">Nenhuma informação detalhada disponível.</p> )}
+              </div>
+            </div>
+            <div className="mt-8 pt-4 border-t">
+              <button onClick={() => setShowModal(false)}
+                className="w-full bg-primary hover:bg-primary/90 text-white font-semibold py-2.5 rounded-lg transition shadow-md hover:shadow-lg">
+                Fechar
+              </button>
+            </div>
+          </div>
+        );
+        setShowModal(true);
+      };
+      
+      const Pagination = ({ currentPage, totalPages, onPageChange }) => {
+        if (totalPages <= 1) return null;
+        const pageNumbers = [];
+        const maxVisiblePages = 5; 
+        const pageBuffer = 2; 
+
+        if (totalPages <= maxVisiblePages) {
+          for (let i = 1; i <= totalPages; i++) pageNumbers.push(i);
+        } else {
+          pageNumbers.push(1);
+          if (currentPage > pageBuffer + 1) pageNumbers.push('...');
+          let startPage = Math.max(2, currentPage - (pageBuffer -1));
+          let endPage = Math.min(totalPages - 1, currentPage + (pageBuffer-1));
+          if(currentPage <= pageBuffer) endPage = Math.min(totalPages -1, maxVisiblePages-1);
+          if(currentPage > totalPages - pageBuffer) startPage = Math.max(2, totalPages - (maxVisiblePages-2));
+          for (let i = startPage; i <= endPage; i++) pageNumbers.push(i);
+          if (currentPage < totalPages - pageBuffer) pageNumbers.push('...');
+          pageNumbers.push(totalPages);
+        }
+        const uniquePageNumbers = [...new Set(pageNumbers)];
+
+        return (
+          <div className="pagination">
+            <button onClick={() => onPageChange(currentPage - 1)} disabled={currentPage === 1} className={`pagination-item ${currentPage === 1 ? 'disabled' : ''}`}>
+              <i className="fas fa-chevron-left"></i>
+            </button>
+            {uniquePageNumbers.map((page, index) => (
+              page === '...' ? 
+                <span key={`ellipsis-${index}`} className="pagination-item disabled px-1">...</span> :
+                <button key={`page-${page}`} onClick={() => onPageChange(page)} className={`pagination-item ${currentPage === page ? 'active' : ''}`}>
+                  {page}
+                </button>
+            ))}
+            <button onClick={() => onPageChange(currentPage + 1)} disabled={currentPage === totalPages} className={`pagination-item ${currentPage === totalPages ? 'disabled' : ''}`}>
+              <i className="fas fa-chevron-right"></i>
+            </button>
+          </div>
+        );
+      };
+
+      const FilterBar = () => (
+        <div className="bg-white p-3 border-b border-gray-200 flex gap-3 items-center filter-bar">
+            <div className="flex-grow">
+                <label htmlFor="secretaria" className="text-sm font-medium text-gray-700 mr-2">Filtrar por Secretaria:</label>
+                <select 
+                    id="secretaria"
+                    name="secretaria"
+                    value={filters.secretaria}
+                    onChange={handleFilterChange}
+                    className="rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 text-sm"
+                >
+                    <option value="all">Todas as Secretarias</option>
+                    {window.listaSecretarias.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+            </div>
+            <button 
+                onClick={toggleSortOrder}
+                className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition"
+                title={filters.ordem === 'DESC' ? 'Mudar para mais antigos primeiro' : 'Mudar para mais novos primeiro'}
+            >
+                <span>{filters.ordem === 'DESC' ? 'Mais Recentes' : 'Mais Antigos'}</span>
+                <i className={`fas ${filters.ordem === 'DESC' ? 'fa-arrow-down' : 'fa-arrow-up'}`}></i>
+            </button>
+        </div>
+      );
+
+      return (
+        <div className="app-container mx-auto relative">
+          <header className="bg-primary text-white px-6 py-5 flex justify-between items-center shadow-hard">
+            <div className="flex items-center gap-4">
+              <div className="relative cursor-pointer" onClick={() => window.location.href='../perfil.php'}>
+                { window.profilePhoto && !photoError ? (
+                  <img src={window.profilePhoto} alt="Perfil" className="rounded-full w-14 h-14 object-cover profile-ring" onError={() => setPhotoError(true)} />
+                ) : (
+                  <div className="rounded-full w-14 h-14 bg-primary/20 flex items-center justify-center profile-ring">
+                    <i className="fas fa-user text-white text-2xl"></i>
+                  </div>
+                )}
+              </div>
+              <div>
+                <h1 className="font-bold text-lg leading-tight">{window.userName}</h1>
+                <p className="text-opacity-90 text-sm">Pedidos Mecânica</p>
+              </div>
+            </div>
+            <div className="flex space-x-4">
+              <button className="p-2 hover:bg-white/10 rounded-full transition-colors" onClick={() => window.location.href='../menu_mecanico.php'}>
+                <i className="fas fa-home text-xl"></i>
+              </button>
+            </div>
+          </header>
+
+          <div className="flex border-b border-gray-200 px-2 sm:px-6 bg-white">
+            {['pedidos', 'notificacoes', 'fichas', 'concluidos'].map(tab => (
+              <button
+                key={tab}
+                className={`flex-1 sm:flex-none px-3 sm:px-4 py-3 font-medium capitalize text-sm sm:text-base ${activeTab === tab ? 'text-primary border-b-2 border-primary' : 'text-gray-500 hover:text-gray-700'}`}
+                onClick={() => setActiveTab(tab)}>
+                {tab}
+              </button>
+            ))}
+          </div>
+
+          <FilterBar />
+
+          <main className="p-4 pb-20 overflow-y-auto">
+            {loading && !showModal && !showEtapaModal && (
+              <div className="fixed top-4 right-4 bg-blue-600 text-white px-4 py-2 rounded-lg shadow-lg z-50 flex items-center gap-2 animate-pulse">
+                <i className="fas fa-spinner fa-spin"></i>
+                <span>Carregando...</span>
+              </div>
+            )}
             
-            document.querySelectorAll('.notification-toast.show').forEach(toast => {
-                setTimeout(() => {
-                    toast.classList.remove('show');
-                }, 5000);
-            });
-        });
-    </script>
-</body>
+            {activeTab === 'pedidos' && (
+              <div className="space-y-4">
+                {pedidosAtivosState.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-64 text-gray-500">
+                    <i className="fas fa-tools text-4xl mb-4"></i>
+                    <p>Nenhum pedido ativo no momento.</p>
+                  </div>
+                ) : (
+                  pedidosAtivosState.map((pedido) => (
+                    <div key={`pedido-${pedido.id}`} className="pedido-card bg-white rounded-xl shadow-soft p-4 border border-gray-100 hover:shadow-md">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <h3 className="font-bold text-gray-800 text-lg">
+                            {pedido.tipo_origem === 'ficha' ? `Ficha #${pedido.ficha_id}` :
+                             pedido.tipo_origem === 'notificacao' ? `Notificação #${pedido.notificacao_id}` :
+                             `Serviço #${pedido.id}`}
+                          </h3>
+                          <p className="text-gray-600 text-sm">
+                            {pedido.tipo_origem === 'ficha' ? 
+                                `${pedido.ficha_nome_veiculo || 'Veículo não especificado'} • ${pedido.ficha_secretaria || 'N/A Sec.'}` :
+                             pedido.tipo_origem === 'notificacao' ?
+                                `${pedido.notificacao_prefixo ? `Prefixo: ${pedido.notificacao_prefixo}`: 'N/A'} • ${pedido.notificacao_secretaria || 'N/A Sec.'}` :
+                                `${pedido.nome_veiculo || 'Veículo não especificado'} • ${pedido.secretaria || 'N/A Sec.'}`
+                            }
+                          </p>
+                        </div>
+                        <span className={`px-2.5 py-1 rounded-full text-xs font-semibold
+                          ${pedido.status === 'em_andamento' ? 'badge-em-andamento' : 
+                           (pedido.status === 'aceito' ? 'badge-aceito' : 'badge-pedido')}`}>
+                          {pedido.status === 'em_andamento' ? 'Em Andamento' : 
+                           (pedido.status === 'aceito' ? 'Aceito' : 'Status Desconhecido')}
+                        </span>
+                      </div>
+                      <p className="my-2.5 text-gray-700 line-clamp-2">
+                        {pedido.tipo_origem === 'notificacao' ? (pedido.notificacao_mensagem || 'Sem descrição') :
+                         pedido.tipo_origem === 'ficha' ? (
+                            [pedido.suspensao, pedido.motor, pedido.freios, pedido.direcao, pedido.sistema_eletrico]
+                                .filter(Boolean).map(val => val.length > 20 ? val.substring(0,17)+'...' : val).join(' | ') || 'Verificar detalhes da ficha.'
+                         ) : (pedido.observacoes || pedido.descricao_servico || 'Sem descrição adicional.')}
+                      </p>
+
+                      {pedido.prioridade && pedido.prioridade !== '' && (
+                        <div className="mt-2 pt-2 border-t border-gray-100">
+                            <p className="text-xs text-purple-700 font-semibold flex items-center gap-1.5">
+                                <i className={`fas ${getEtapaIconClass(pedido.prioridade)} fa-fw`}></i>
+                                Etapa: {getEtapaLabel(pedido.prioridade)}
+                            </p>
+                        </div>
+                      )}
+                      
+                      {pedido.status === 'em_andamento' && (
+                        <div className="timer-container">
+                          <div className="timer-display">
+                            {formatarTempo(timers[pedido.id] ? timers[pedido.id].tempoDecorrido : 0)}
+                          </div>
+                          <button onClick={() => handleFinalizarServico(pedido.id)}
+                            className="w-full bg-red-500 hover:bg-red-600 text-white font-semibold py-2 rounded-lg transition flex items-center justify-center gap-2 shadow hover:shadow-md">
+                            <i className="fas fa-stop-circle"></i> Finalizar Serviço
+                          </button>
+                        </div>
+                      )}
+
+                      <div className="flex justify-between items-center mt-3 pt-2 border-t border-gray-100">
+                        <span className="text-xs text-gray-500">
+                           {/* CORREÇÃO: Usando o campo de data correto para cada tipo */}
+                          {formatDate(
+                              pedido.ficha_data || pedido.notificacao_data,
+                              pedido.tipo_origem === 'ficha' ? pedido.ficha_hora : null
+                          )}
+                        </span>
+                        <div className="flex flex-wrap gap-2 ml-auto action-buttons">
+                          <button onClick={() => handleVerDetalhes(pedido)} className="flex items-center gap-1.5 bg-blue-500 hover:bg-blue-600 text-white px-3 py-1.5 rounded-md text-xs font-medium shadow hover:shadow-md transition">
+                              <i className="fas fa-eye"></i> Detalhes
+                          </button>
+                          {(pedido.status === 'aceito' || pedido.status === 'em_andamento') && (
+                            <button
+                              onClick={() => handleOpenEtapaModal(pedido)}
+                              title={pedido.prioridade ? `Alterar Etapa Atual: ${getEtapaLabel(pedido.prioridade)}` : 'Definir Etapa do Serviço'}
+                              className="flex items-center gap-1.5 bg-purple-500 hover:bg-purple-600 text-white px-3 py-1.5 rounded-md text-xs font-medium shadow hover:shadow-md transition"
+                            >
+                              <i className="fas fa-tasks"></i> 
+                              {pedido.prioridade && pedido.prioridade !== '' ? 'Etapa' : 'Definir Etapa'}
+                            </button>
+                          )}
+                          {pedido.status === 'aceito' && (
+                              <button onClick={() => handleIniciarServico(pedido.id)} className="flex items-center gap-1.5 bg-green-500 hover:bg-green-600 text-white px-3 py-1.5 rounded-md text-xs font-medium shadow hover:shadow-md transition">
+                                  <i className="fas fa-play"></i> Iniciar
+                              </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+            {activeTab === 'notificacoes' && (
+              <div className="space-y-4">
+                {notificacoesDisponiveisState.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-64 text-gray-500">
+                    <i className="fas fa-bell-slash text-4xl mb-4"></i>
+                    <p>Nenhuma notificação disponível.</p>
+                  </div>
+                ) : (
+                  notificacoesDisponiveisState.map((notificacao) => (
+                    <div key={`notif-${notificacao.id}`} className="pedido-card bg-white rounded-xl shadow-soft p-4 border border-gray-100 hover:shadow-md">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <h3 className="font-bold text-gray-800 text-lg">Notificação #{notificacao.id}</h3>
+                          <p className="text-gray-600 text-sm">
+                            {notificacao.prefixo ? `Prefixo: ${notificacao.prefixo}` : (notificacao.veiculo || 'Veículo N/A')}
+                            {notificacao.secretaria ? ` • ${notificacao.secretaria}` : ' • Sec. N/A'}
+                          </p>
+                        </div>
+                        <span className="px-2.5 py-1 rounded-full text-xs font-semibold badge-notificacao">Notificação</span>
+                      </div>
+                      <p className="my-2.5 text-gray-700 line-clamp-2">{notificacao.mensagem || 'Sem mensagem.'}</p>
+                      <div className="flex justify-between items-center mt-3 pt-2 border-t border-gray-100">
+                        <span className="text-xs text-gray-500">{formatDate(notificacao.data)}</span>
+                        <div className="flex flex-wrap gap-2 ml-auto action-buttons">
+                          <button onClick={() => handleVerDetalhes(notificacao)} className="flex items-center gap-1.5 bg-blue-500 hover:bg-blue-600 text-white px-3 py-1.5 rounded-md text-xs font-medium shadow hover:shadow-md transition">
+                            <i className="fas fa-eye"></i> Detalhes
+                          </button>
+                          <button onClick={() => handlePrimeiraAceitacao(notificacao.id)} className="flex items-center gap-1.5 bg-green-500 hover:bg-green-600 text-white px-3 py-1.5 rounded-md text-xs font-medium shadow hover:shadow-md transition">
+                            <i className="fas fa-check"></i> Aceitar
+                          </button>
+                           <button onClick={() => handleDismiss(notificacao.id, 'notificacao')} className="flex items-center gap-1.5 bg-gray-400 hover:bg-gray-500 text-white px-3 py-1.5 rounded-md text-xs font-medium shadow hover:shadow-md transition" title="Dispensar Notificação">
+                            <i className="fas fa-trash-alt"></i> Dispensar
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+            {activeTab === 'fichas' && (
+              <div className="space-y-4">
+                {fichasDisponiveisState.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-64 text-gray-500">
+                    <i className="fas fa-file-alt text-4xl mb-4"></i>
+                    <p>Nenhuma ficha disponível.</p>
+                  </div>
+                ) : (
+                  fichasDisponiveisState.map((ficha) => (
+                    <div key={`ficha-${ficha.id}`} className="pedido-card bg-white rounded-xl shadow-soft p-4 border border-gray-100 hover:shadow-md">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <h3 className="font-bold text-gray-800 text-lg">Ficha #{ficha.id}</h3>
+                          <p className="text-gray-600 text-sm">
+                            {ficha.nome_veiculo || 'Veículo N/A'}
+                            {ficha.secretaria ? ` • ${ficha.secretaria}` : ' • Sec. N/A'}
+                          </p>
+                        </div>
+                        <span className="px-2.5 py-1 rounded-full text-xs font-semibold badge-ficha">Ficha</span>
+                      </div>
+                      <p className="my-2.5 text-gray-700 line-clamp-2">
+                        { [ficha.suspensao, ficha.motor, ficha.freios, ficha.direcao, ficha.sistema_eletrico, ficha.observacoes]
+                            .filter(Boolean).map(val => val.length > 20 ? val.substring(0,17)+'...' : val).join(' | ') || 'Verificar detalhes.'
+                        }
+                      </p>
+                      <div className="flex justify-between items-center mt-3 pt-2 border-t border-gray-100">
+                        <span className="text-xs text-gray-500">{formatDate(ficha.data, ficha.hora)}</span>
+                        <div className="flex flex-wrap gap-2 ml-auto action-buttons">
+                          <button onClick={() => handleVerDetalhes(ficha)} className="flex items-center gap-1.5 bg-blue-500 hover:bg-blue-600 text-white px-3 py-1.5 rounded-md text-xs font-medium shadow hover:shadow-md transition">
+                            <i className="fas fa-eye"></i> Detalhes
+                          </button>
+                          <button onClick={() => handlePrimeiraAceitacaoFicha(ficha.id)} className="flex items-center gap-1.5 bg-green-500 hover:bg-green-600 text-white px-3 py-1.5 rounded-md text-xs font-medium shadow hover:shadow-md transition">
+                            <i className="fas fa-check"></i> Aceitar
+                          </button>
+                           <button onClick={() => handleDismiss(ficha.id, 'ficha')} className="flex items-center gap-1.5 bg-gray-400 hover:bg-gray-500 text-white px-3 py-1.5 rounded-md text-xs font-medium shadow hover:shadow-md transition" title="Dispensar Ficha">
+                            <i className="fas fa-trash-alt"></i> Dispensar
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+            {activeTab === 'concluidos' && (
+              <div>
+                <div className="space-y-4 mb-8">
+                  {servicosFinalizadosState.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center h-64 text-gray-700">
+                      <i className="fas fa-check-circle text-4xl mb-4"></i>
+                      <p>Nenhum serviço finalizado.</p>
+                    </div>
+                  ) : (
+                    servicosFinalizadosState.map((servico) => (
+                      <div key={`concluido-${servico.id}`} className="pedido-card bg-white rounded-xl shadow-soft p-4 border border-gray-100 hover:shadow-md">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <h3 className="font-bold text-gray-800 text-lg">Serviço #{servico.id}</h3>
+                            <p className="text-gray-600 text-sm">
+                              {servico.tipo_origem === 'ficha' ? 
+                                  `${servico.ficha_nome_veiculo || 'Veículo N/A'} • ${servico.ficha_secretaria || 'Sec N/A'}` :
+                               servico.tipo_origem === 'notificacao' ?
+                                  `${servico.notificacao_prefixo || 'N/A'} • ${servico.notificacao_secretaria || 'Sec N/A'}` :
+                                  `${servico.nome_veiculo || 'Veículo N/A'} • ${servico.secretaria || 'Sec N/A'}`
+                              }
+                            </p>
+                          </div>
+                          <span className="px-2.5 py-1 rounded-full text-xs font-semibold badge-concluido">Concluído</span>
+                        </div>
+                        <p className="my-2.5 text-gray-700 line-clamp-2">
+                          {servico.tipo_origem === 'notificacao' ? (servico.notificacao_mensagem || "Ver detalhes") :
+                           servico.tipo_origem === 'ficha' ? (
+                              [servico.suspensao, servico.motor, servico.freios, servico.direcao]
+                                .filter(Boolean).map(val => val.length > 20 ? val.substring(0,17)+'...' : val).join(' | ') || 'Ver detalhes da ficha.'
+                           ) : (servico.observacoes || servico.descricao_servico || "Ver detalhes")}
+                        </p>
+                        {servico.prioridade && servico.prioridade !== '' && (
+                            <p className="text-xs text-purple-700 font-semibold mt-1">
+                                Etapa Final: {getEtapaLabel(servico.prioridade)}
+                            </p>
+                        )}
+                        <div className="flex justify-between items-center mt-3 pt-2 border-t border-gray-100">
+                          <span className="text-xs text-gray-500">{formatDate(servico.data_conclusao)}</span>
+                           { servico.tempo_real != null && <span className="text-xs text-gray-500">Tempo: {formatarTempo(servico.tempo_real)}</span>}
+                          <div className="flex space-x-2 ml-auto">
+                            <button onClick={() => handleVerDetalhes(servico)} className="flex items-center gap-1.5 bg-blue-500 hover:bg-blue-600 text-white px-3 py-1.5 rounded-md text-xs font-medium shadow hover:shadow-md transition">
+                                <i className="fas fa-eye"></i> Detalhes
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+                {totalPaginas > 1 && activeTab === 'concluidos' && (
+                  <Pagination currentPage={paginaAtual} totalPages={totalPaginas} onPageChange={handlePageChange} />
+                )}
+              </div>
+            )}
+          </main>
+
+          <nav className="fixed bottom-0 w-full bg-white border-t border-gray-300 flex justify-around items-center h-16 shadow-hard ml-[-8px]">
+            {[
+              {icon: 'fa-user', label: 'Perfil', tab: 'profile', action: () => window.location.href = '../perfil.php'},
+              {icon: 'fa-tools', label: 'Pedidos', tab: 'pedidos', action: () => setActiveTab('pedidos')},
+              {icon: 'fa-sign-out-alt', label: 'Sair', tab: 'logout', action: () => window.location.href = 'logout.php'}
+            ].map((item) => (
+              <button
+                key={item.tab}
+                className={`flex flex-col items-center justify-center w-1/3 h-full p-1 transition-all 
+                            ${item.tab === 'logout' ? 'text-red-500 hover:text-red-700' : 
+                            (activeTab === item.tab && item.tab !== 'profile' ? 'text-primary' : 'text-gray-500 hover:text-primary')}`}
+                onClick={item.action}>
+                <i className={`fas ${item.icon} text-xl`}></i>
+                <span className="text-xs font-medium mt-0.5">{item.label}</span>
+              </button>
+            ))}
+          </nav>
+
+          {showModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4 transition-opacity duration-300 ease-in-out opacity-100" onClick={() => setShowModal(false)}>
+              <div className="bg-white rounded-xl w-full max-w-3xl shadow-xl transform transition-all duration-300 ease-in-out scale-100" onClick={e => e.stopPropagation()}> 
+                {modalContent}
+              </div>
+            </div>
+          )}
+
+          {showEtapaModal && selectedServicoParaEtapa && (
+            <div 
+              className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-[60] p-4 transition-opacity duration-300 ease-in-out opacity-100"
+              onClick={() => { if(!currentEtapaLoading) setShowEtapaModal(false); }}
+            >
+              <div 
+                className="bg-white rounded-xl w-full max-w-lg shadow-2xl transform transition-all duration-300 ease-in-out scale-100 p-6 md:p-8 max-h-[90vh] overflow-y-auto" 
+                onClick={e => e.stopPropagation()}
+              >
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-xl sm:text-2xl font-bold text-gray-800">
+                      Definir Etapa do Serviço
+                  </h3>
+                  <button onClick={() => { if(!currentEtapaLoading) setShowEtapaModal(false); }} disabled={currentEtapaLoading} className="text-gray-400 hover:text-gray-600 transition-colors">
+                      <i className="fas fa-times fa-lg"></i>
+                  </button>
+                </div>
+                
+                <div className="mb-4 p-3 bg-indigo-50 rounded-lg border border-indigo-200">
+                  <p className="text-sm text-gray-700">
+                    <span className="font-semibold">Serviço ID:</span> {selectedServicoParaEtapa.id}
+                  </p>
+                  <p className="text-sm text-gray-700">
+                    <span className="font-semibold">Veículo:</span> {
+                      selectedServicoParaEtapa.tipo_origem === 'ficha' ? 
+                      `${selectedServicoParaEtapa.ficha_nome_veiculo || 'N/A'}` :
+                      (selectedServicoParaEtapa.notificacao_prefixo || selectedServicoParaEtapa.nome_veiculo || 'N/A')
+                    }
+                  </p>
+                  {selectedServicoParaEtapa.prioridade && selectedServicoParaEtapa.prioridade !== '' && (
+                       <p className="text-sm text-indigo-700 mt-1">
+                          <span className="font-semibold">Etapa Atual:</span> {getEtapaLabel(selectedServicoParaEtapa.prioridade)}
+                       </p>
+                  )}
+                </div>
+
+                {currentEtapaLoading && (
+                  <div className="absolute inset-0 bg-white/70 flex flex-col items-center justify-center rounded-xl z-10">
+                      <i className="fas fa-spinner fa-spin text-primary text-3xl"></i>
+                      <p className="mt-2 text-primary font-medium">Salvando etapa...</p>
+                  </div>
+                )}
+
+                <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${currentEtapaLoading ? 'opacity-50 pointer-events-none' : ''}`}>
+                  {etapaOptions.map(option => (
+                    <button
+                      key={option.value}
+                      disabled={currentEtapaLoading}
+                      onClick={() => handleSalvarEtapa(selectedServicoParaEtapa.id, option.value)}
+                      title={`Definir etapa como: ${option.label}`}
+                      className={`w-full flex items-center gap-3 text-left p-3 rounded-lg border-2 transition-all duration-150 ease-in-out focus:outline-none focus:ring-2 focus:ring-opacity-50
+                                  ${selectedServicoParaEtapa.prioridade === option.value 
+                                    ? 'bg-primary border-primary text-white shadow-md ring-primary/60' 
+                                    : 'bg-white border-gray-300 hover:border-primary hover:bg-primary/5 text-gray-700 hover:text-primary focus:ring-primary'
+                                  }
+                                  ${option.value === '' ? (selectedServicoParaEtapa.prioridade === option.value ? 'bg-red-600 border-red-600 text-white' : 'border-red-400 hover:border-red-500 hover:bg-red-500/10 hover:text-red-600 focus:ring-red-500') : ''}
+                                  `}
+                    >
+                      <i className={`${option.icon} fa-fw text-base ${selectedServicoParaEtapa.prioridade === option.value ? 'text-white' : (option.value === '' ? (selectedServicoParaEtapa.prioridade === option.value ? 'text-white':'text-red-500') : 'text-primary/80')}`}></i>
+                      <span className="font-medium text-sm">{option.label}</span>
+                    </button>
+                  ))}
+                </div>
+                <button 
+                  onClick={() => { if(!currentEtapaLoading) setShowEtapaModal(false); }} 
+                  disabled={currentEtapaLoading}
+                  className={`mt-6 w-full bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-2.5 rounded-lg transition ${currentEtapaLoading ? 'opacity-50' : ''}`}
+                >
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script> 
+</body> 
 </html>
